@@ -1,13 +1,14 @@
+mod bot;
+
 use anyhow::{Context, Result, anyhow};
 use dotenvy::dotenv;
 use grammers_client::{Client, SignInError, Update};
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
 use reqwest::Client as HttpClient;
-use serde::Serialize;
-use std::{collections::HashSet, io::Write, sync::Arc, time::Duration};
+use std::{collections::HashSet, io::Write, sync::Arc};
 use tokio::io::{self, AsyncBufReadExt};
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{Duration, MissedTickBehavior, interval};
 use tracing::{info, warn};
 
 #[derive(Clone)]
@@ -19,7 +20,8 @@ struct Cfg {
     session_path: String,
     channels: Vec<String>,
     bot_token: String,
-    target_chat_id: i64,
+    /// Path to the SQLite file that stores subscriber chat IDs.
+    bot_db_path: String,
 }
 
 fn must_env(key: &str) -> Result<String> {
@@ -87,30 +89,6 @@ async fn ensure_user_login(client: &Client, cfg: &Cfg) -> Result<()> {
     }
 }
 
-#[derive(Serialize)]
-struct SendMessageReq<'a> {
-    chat_id: i64,
-    text: &'a str,
-    disable_web_page_preview: bool,
-}
-
-async fn bot_send_digest(http: &HttpClient, cfg: &Cfg, text: &str) -> Result<()> {
-    let url = format!("https://api.telegram.org/bot{}/sendMessage", cfg.bot_token);
-    let body = SendMessageReq {
-        chat_id: cfg.target_chat_id,
-        text,
-        disable_web_page_preview: true,
-    };
-
-    let resp = http.post(url).json(&body).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let raw = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("Bot API sendMessage failed: {status} body={raw}"));
-    }
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
@@ -127,20 +105,29 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|_| "./telegram.session.sqlite".into()),
         channels: parse_channels(&must_env("TG_CHANNELS")?),
         bot_token: must_env("BOT_TOKEN")?,
-        target_chat_id: must_env("TARGET_CHAT_ID")?
-            .parse()
-            .context("TARGET_CHAT_ID must be i64")?,
+        bot_db_path: std::env::var("BOT_DB_PATH")
+            .unwrap_or_else(|_| "./bot_subscribers.sqlite".into()),
     };
 
     if cfg.channels.is_empty() {
         return Err(anyhow!("TG_CHANNELS is empty"));
     }
 
-    // Session + sender pool
-    let session = Arc::new(SqliteSession::open(&cfg.session_path)?); // recommended storage :contentReference[oaicite:3]{index=3}
-    let pool = SenderPool::new(Arc::clone(&session), cfg.api_id); // provides updates receiver :contentReference[oaicite:4]{index=4}
+    // Open subscriber database and start bot long-poll in the background.
+    let bot_db = bot::open_db(&cfg.bot_db_path)?;
+    {
+        let http = HttpClient::new();
+        let bot_token = cfg.bot_token.clone();
+        let db = bot_db.clone();
+        tokio::spawn(async move {
+            bot::run_bot_polling(http, bot_token, db).await;
+        });
+    }
 
-    // Create client before moving fields out of pool
+    // Session + sender pool
+    let session = Arc::new(SqliteSession::open(&cfg.session_path)?);
+    let pool = SenderPool::new(Arc::clone(&session), cfg.api_id);
+
     let client = Client::new(&pool);
 
     // Start I/O runner
@@ -193,7 +180,7 @@ async fn main() -> Result<()> {
                 let mut out = String::new();
                 for (i, item) in buffer.iter().enumerate() {
                     if i > 0 { out.push_str("\n\n"); }
-                    if out.len() + item.len() + 2 > 3500 { // conservative
+                    if out.len() + item.len() + 2 > 3500 {
                         out.push_str("\n\n…(truncated)");
                         break;
                     }
@@ -201,8 +188,8 @@ async fn main() -> Result<()> {
                 }
                 buffer.clear();
 
-                if let Err(e) = bot_send_digest(&http, &cfg, &out).await {
-                    warn!("Failed to send digest: {e}");
+                if let Err(e) = bot::broadcast(&http, &cfg.bot_token, &bot_db, &out).await {
+                    warn!("Failed to broadcast digest: {e}");
                 }
             }
 
@@ -213,35 +200,23 @@ async fn main() -> Result<()> {
                 };
 
                 if let Update::NewMessage(msg) = update {
-
-                    // let Channel(p) =  msg.peer.id else {
-                    //     continue; // only care about channel posts for now
-                    // };
-                    // Only channel posts / messages that belong to the watched peers
                     let Ok(peer) = msg.peer() else {
                         continue;
                     };
                     info!("Received new message update: peer_id={:?}", peer.id().bare_id());
                     if !allowed_peer_ids.contains(&peer.id().bare_id()) {
-                            continue;
+                        continue;
                     }
                     info!("Received new message update: message={:?}", msg);
-                    // if let Some(chat) = msg.chat() {
-                    //     let pid = chat.id();
-                    //     if !allowed_peer_ids.contains(&pid) {
-                    //         continue;
-                    //     }
-
-                    //     let text = msg.text().trim();
-                    //     if text.is_empty() {
-                    //         continue;
-                    //     }
-
-                    //     // Simple formatting for v0
-                    //     let title = chat.name().unwrap_or("<chat>");
-                    //     let line = format!("🛰️ {title}\n{text}");
-                    //     buffer.push(line);
-                    // }
+                    let text = msg.text().trim();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let title = peer.name().unwrap_or("<unknown>");
+                    let line = format!("🛰️ {title}\n{text}");
+                    if let Err(e) = bot::broadcast(&http, &cfg.bot_token, &bot_db, &line).await {
+                        warn!("Failed to broadcast message: {e}");
+                    }
                 }
             }
         }

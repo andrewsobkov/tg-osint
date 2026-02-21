@@ -10,6 +10,7 @@ futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "io-std"] }
+sqlite = "0.37"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
