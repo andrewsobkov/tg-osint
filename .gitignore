@@ -1,0 +1,16 @@
+# Rust build artifacts
+/target/
+
+# Environment variables - NEVER commit credentials
+.env
+.env.*
+
+# Telegram session file - contains your auth token
+*.session
+*.session.sqlite
+*.session-journal
+
+# Editor
+.idea/
+.vscode/
+*.swp
