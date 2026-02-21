@@ -1,4 +1,5 @@
 mod bot;
+mod filter;
 
 use anyhow::{Context, Result, anyhow};
 use dotenvy::dotenv;
@@ -8,7 +9,6 @@ use grammers_session::storages::SqliteSession;
 use reqwest::Client as HttpClient;
 use std::{collections::HashSet, io::Write, sync::Arc};
 use tokio::io::{self, AsyncBufReadExt};
-use tokio::time::{Duration, MissedTickBehavior, interval};
 use tracing::{info, warn};
 
 #[derive(Clone)]
@@ -163,60 +163,36 @@ async fn main() -> Result<()> {
     );
 
     let http = HttpClient::new();
-    let mut tick = interval(Duration::from_secs(60));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    let mut buffer: Vec<String> = Vec::new();
+    // Alert filter: threat detection + location matching + dedup.
+    let mut alert_filter = filter::AlertFilter::from_env();
+    info!("Filter config: {alert_filter}");
 
     info!("Running. Waiting for new messages...");
     loop {
-        tokio::select! {
-            _ = tick.tick() => {
-                if buffer.is_empty() {
-                    continue;
-                }
+        let Ok(update) = stream.next().await else {
+            warn!("Update stream ended.");
+            break;
+        };
 
-                // Keep it safely under Telegram 4096 limit
-                let mut out = String::new();
-                for (i, item) in buffer.iter().enumerate() {
-                    if i > 0 { out.push_str("\n\n"); }
-                    if out.len() + item.len() + 2 > 3500 {
-                        out.push_str("\n\n…(truncated)");
-                        break;
-                    }
-                    out.push_str(item);
-                }
-                buffer.clear();
-
-                if let Err(e) = bot::broadcast(&http, &cfg.bot_token, &bot_db, &out).await {
-                    warn!("Failed to broadcast digest: {e}");
-                }
+        if let Update::NewMessage(msg) = update {
+            let Ok(peer) = msg.peer() else {
+                continue;
+            };
+            if !allowed_peer_ids.contains(&peer.id().bare_id()) {
+                continue;
             }
+            let text = msg.text().trim();
+            if text.is_empty() {
+                continue;
+            }
+            let title = peer.name().unwrap_or("<unknown>");
 
-            maybe = stream.next() => {
-                let Ok(update) = maybe else {
-                    warn!("Update stream ended.");
-                    break;
-                };
-
-                if let Update::NewMessage(msg) = update {
-                    let Ok(peer) = msg.peer() else {
-                        continue;
-                    };
-                    info!("Received new message update: peer_id={:?}", peer.id().bare_id());
-                    if !allowed_peer_ids.contains(&peer.id().bare_id()) {
-                        continue;
-                    }
-                    info!("Received new message update: message={:?}", msg);
-                    let text = msg.text().trim();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    let title = peer.name().unwrap_or("<unknown>");
-                    let line = format!("🛰️ {title}\n{text}");
-                    if let Err(e) = bot::broadcast(&http, &cfg.bot_token, &bot_db, &line).await {
-                        warn!("Failed to broadcast message: {e}");
-                    }
+            // Run through the filter pipeline
+            if let Some(formatted) = alert_filter.process(title, text) {
+                info!("Alert forwarded from @{title}");
+                if let Err(e) = bot::broadcast(&http, &cfg.bot_token, &bot_db, &formatted).await {
+                    warn!("Failed to broadcast alert: {e}");
                 }
             }
         }
