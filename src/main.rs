@@ -1,5 +1,6 @@
 mod bot;
 mod filter;
+mod llm;
 
 use anyhow::{Context, Result, anyhow};
 use dotenvy::dotenv;
@@ -168,6 +169,10 @@ async fn main() -> Result<()> {
     let mut alert_filter = filter::AlertFilter::from_env();
     info!("Filter config: {alert_filter}");
 
+    // LLM secondary filter (optional).
+    let llm_filter = llm::LlmFilter::from_env();
+    info!("LLM filter: {llm_filter}");
+
     info!("Running. Waiting for new messages...");
     loop {
         let Ok(update) = stream.next().await else {
@@ -187,9 +192,14 @@ async fn main() -> Result<()> {
                 continue;
             }
             let title = peer.name().unwrap_or("<unknown>");
+            let channel_id = peer.id().bare_id();
 
-            // Run through the filter pipeline
-            if let Some(formatted) = alert_filter.process(title, text) {
+            // Run through the filter pipeline (keyword → LLM → dedup → format)
+            let result = alert_filter
+                .process_with_llm(channel_id, title, text, &llm_filter)
+                .await;
+
+            if let Some(formatted) = result {
                 info!("Alert forwarded from @{title}");
                 if let Err(e) = bot::broadcast(&http, &cfg.bot_token, &bot_db, &formatted).await {
                     warn!("Failed to broadcast alert: {e}");

@@ -65,6 +65,10 @@ A Telegram OSINT tool written in Rust that monitors Ukrainian air-raid / militar
 | `BOT_DB_PATH` | ❌ | Path for the subscriber SQLite file (default: `./bot_subscribers.sqlite`) |
 | `DEDUP_WINDOW_SECS` | ❌ | Dedup sliding window in seconds (default: `180`) |
 | `FORWARD_ALL_THREATS` | ❌ | `true` to forward alerts even outside your area (default: `false`) |
+| `LLM_ENABLED` | ❌ | `true` to enable LLM secondary filter (default: `false`) |
+| `LLM_MODEL` | ❌ | Ollama model name (default: `qwen2.5:7b`) |
+| `LLM_ENDPOINT` | ❌ | Ollama / llama-server base URL (default: `http://127.0.0.1:11434`) |
+| `LLM_TIMEOUT_MS` | ❌ | LLM request timeout in milliseconds (default: `3000`) |
 
 > **Tip:** Use short stems to catch all Ukrainian/Russian declension forms.
 > For example, `Київ` matches "Київ", "Києву"; `Киев` matches "Киев", "Киеву", "Киева".
@@ -85,6 +89,10 @@ Channel message
   ├─ Location matching (district > city > oblast)
   │   └─ No location match and not nationwide? → skip (unless FORWARD_ALL_THREATS=true)
   │
+  ├─ 🤖 LLM verification (optional, LLM_ENABLED=true)
+  │   ├─ Confirms / removes keyword-detected threats
+  │   └─ Fail-open: on timeout/error, keyword result used as-is
+  │
   ├─ Urgency check ("повторно", "нова хвиля", "терміново" …)
   │   └─ Urgent? → forward (once per source channel, not cross-channel echo)
   │
@@ -93,6 +101,73 @@ Channel message
   │   └─ Proximity upgrade (oblast → city → district)? → forward
   │
   └─ Format & broadcast to all /start_receive subscribers
+```
+
+## LLM secondary filter (optional)
+
+A local LLM can verify keyword-detected threats and suppress false positives
+(e.g. analytical reports that mention "пускові зони" triggering a missile alert).
+
+Uses [Ollama](https://ollama.com/) — one-command install, auto GPU detection, no manual model downloads.
+
+### Model recommendation
+
+| Model | VRAM / RAM | Speed (RTX 3060) | UA/RU quality | Best for |
+|---|---|---|---|---|
+| **`qwen2.5:7b`** ⭐ | ~4.5 GB VRAM | ~0.5s | ★★★★★ | GPU with ≥6 GB VRAM |
+| `qwen2.5:3b` | ~2 GB RAM | ~0.3s | ★★★★ | CPU-only / low RAM |
+| `gemma2:9b` | ~6 GB VRAM | ~0.8s | ★★★★ | Alternative if Qwen has issues |
+| `llama3.1:8b` | ~5 GB VRAM | ~0.5s | ★★★ | English-heavy, weaker on UA |
+| `mistral:7b` | ~4.5 GB VRAM | ~0.5s | ★★★ | Weaker on Ukrainian |
+
+**Why Qwen 2.5?** Strongest multilingual model at 7B — trained with extensive Cyrillic data, benchmarks highest on Ukrainian/Russian text understanding among models that fit in 6 GB VRAM.
+
+### Setup
+
+1. Install Ollama:
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ```
+
+2. Pull the model:
+   ```bash
+   ollama pull qwen2.5:7b          # GPU (~4.5 GB)
+   # OR for CPU-only / low RAM:
+   ollama pull qwen2.5:3b          # CPU (~2 GB)
+   ```
+
+3. Enable in `.env`:
+   ```env
+   LLM_ENABLED=true
+   LLM_MODEL=qwen2.5:7b                      # default
+   LLM_ENDPOINT=http://127.0.0.1:11434        # default (Ollama)
+   LLM_TIMEOUT_MS=3000                         # default
+   ```
+
+Or use the helper script:
+```bash
+chmod +x run_llm_server.sh
+./run_llm_server.sh          # pulls model + verifies
+./run_llm_server.sh --3b     # use smaller 3B model
+```
+
+### How it works
+
+- Keywords detect candidate threats (fast, <1ms)
+- LLM verifies: "is this an **active** alert or analytical text?" (<1s on GPU)
+- LLM can only **remove** threats, never add new ones
+- On timeout/error → keyword result used as-is (**fail-open** for safety)
+- AllClear messages bypass LLM entirely (no latency on threat cessation)
+
+### Alternative: llama.cpp
+
+If you prefer raw llama.cpp over Ollama:
+```bash
+llama-server --model qwen2.5-7b-instruct-q4_k_m.gguf --port 8012 --n-gpu-layers 99 --ctx-size 2048
+```
+```env
+LLM_ENDPOINT=http://127.0.0.1:8012
+LLM_MODEL=qwen2.5
 ```
 
 ### Detected threat types
@@ -106,7 +181,7 @@ Channel message
 | Shahed/drone | шахед, герань, мопед, газонокосил, ударн, бпла, безпілотник, камікадзе | мопед, беспилотник, камикадзе, мохаджер | 🔺 |
 | Recon drone | розвідувальн, орлан, ланцет, елерон, фурія | разведывательн, элерон | 🛸 |
 | Aircraft | авіаці, зліт, ту-95, ту-160, ту-22, міг-31, су-57, су-35, а-50, іл-76 | авиаци, взлёт, миг-31, ту-95… | ✈️ |
-| Missile (generic) | ракет, пуск, запуск, ціл, курс на, летять на, с-300 | ракет, пуск, цел, летит на, направлени | 🚀 |
+| Missile (generic) | ракет, запуск, ціль/цілі/цілей, курс на, летять на, с-300 | ракет, запуск, цель/цели/целей, летит на, с-300 | 🚀 |
 | All clear | відбій, загроза минула, чисте небо | отбой, угроза миновала, чистое небо | ✅ |
 | Other | загроз, тривог, вибух, прильот, уламк, укриття, пожеж, кассетн | угроз, тревог, взрыв, прилёт, осколк, укрытие, пожар, громко | ⚠️ |
 

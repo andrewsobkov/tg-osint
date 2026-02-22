@@ -73,6 +73,39 @@ impl ThreatKind {
             Self::Other => 0,
         }
     }
+
+    /// Stable English name used for LLM JSON interchange.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Ballistic => "Ballistic",
+            Self::Hypersonic => "Hypersonic",
+            Self::CruiseMissile => "CruiseMissile",
+            Self::GuidedBomb => "GuidedBomb",
+            Self::Missile => "Missile",
+            Self::Shahed => "Shahed",
+            Self::ReconDrone => "ReconDrone",
+            Self::Aircraft => "Aircraft",
+            Self::AllClear => "AllClear",
+            Self::Other => "Other",
+        }
+    }
+
+    /// Parse from the LLM's JSON string. Case-insensitive.
+    pub fn from_variant_name(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "ballistic" => Some(Self::Ballistic),
+            "hypersonic" => Some(Self::Hypersonic),
+            "cruisemissile" | "cruise_missile" => Some(Self::CruiseMissile),
+            "guidedbomb" | "guided_bomb" | "kab" => Some(Self::GuidedBomb),
+            "missile" => Some(Self::Missile),
+            "shahed" => Some(Self::Shahed),
+            "recondrone" | "recon_drone" => Some(Self::ReconDrone),
+            "aircraft" => Some(Self::Aircraft),
+            "allclear" | "all_clear" => Some(Self::AllClear),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
 }
 
 /// Keyword stems for each threat kind.  **Order matters** – more specific
@@ -124,7 +157,6 @@ const THREAT_KEYWORDS: &[(ThreatKind, &[&str])] = &[
             "кінжал",
             "точка-у",
             "брсд",             // балістична ракета середньої дальності
-            "мкр",              // міжконтинентальна ракета
             "міжконтинентальн", // міжконтинентальна
             // RU
             "баллистик", // баллистика, баллистики …
@@ -133,7 +165,6 @@ const THREAT_KEYWORDS: &[(ThreatKind, &[&str])] = &[
             "кинжал",
             "точка-у",
             "брсд",             // same abbreviation in RU
-            "мбр",              // межконтинентальная баллистическая ракета
             "межконтинентальн", // межконтинентальная
             // missile names / designations
             "iskander",
@@ -205,15 +236,21 @@ const THREAT_KEYWORDS: &[(ThreatKind, &[&str])] = &[
             "каб-500",
             "каб-1500",
             "каб-250",
-            "каб ", // "КАБ " with trailing space to avoid substring hits
-            "умпб", // УМПБ (unified modular glide bomb)
-            "умпк", // УМПК (glide kit)
+            "каб ",  // "КАБ " with trailing space
+            "каб,",  // "КАБ," punctuation variant
+            "каб.",  // "КАБ." end of sentence
+            "каб\n", // "КАБ" at end of line
+            "умпб",  // УМПБ (unified modular glide bomb)
+            "умпк",  // УМПК (glide kit)
             "jdam",
             "фаб-500",
             "фаб-1500",
             "фаб-250",
             "фаб-3000",
             "фаб ", // "ФАБ " with trailing space
+            "фаб,",
+            "фаб.",
+            "фаб\n",
         ],
     ),
     // ── Shahed / attack drone ──────────────────────────────────────────
@@ -296,24 +333,31 @@ const THREAT_KEYWORDS: &[(ThreatKind, &[&str])] = &[
         ],
     ),
     // ── Generic missile (AFTER more specific kinds) ────────────────────
+    //
+    // CAREFUL: stems here must not be too greedy. Avoid short stems that
+    // appear in non-alert analytical text (e.g. "пускові зони",
+    // "у напрямку Кілія", "цілком спокійно").
     (
         ThreatKind::Missile,
         &[
-            "ракет",   // UA+RU: ракета, ракети, ракеты, ракетна …
-            "пуск",    // UA+RU: пуск, пуски
-            "запуск",  // запуск ракет
-            "ціл",     // UA: ціль/цілі на Київ (target heading to)
-            "цел",     // RU: цель/цели на Киев
-            "курс на", // heading to …
-            "курсом на",
-            "напрямку",   // UA: в напрямку (heading towards)
-            "направлени", // RU: направление, направлении
-            "летит на",   // RU: flying to
-            "летять на",  // UA: flying to
+            "ракет",  // UA+RU: ракета, ракети, ракеты, ракетна …
+            "запуск", // запуск ракет (more specific than "пуск")
+            // UA target forms — safe because ь≠к so "ціль" ⊄ "цілком"
+            "ціль",  // ціль на Київ
+            "цілі",  // 2 цілі на Київ
+            "цілей", // кількість цілей
+            // RU target forms — "цель" ⊄ "целом" (ь≠о), but
+            // "цели" ⊂ "целиком" so we need trailing space/newline variants.
+            "цель",  // цель на Киев (ь≠о safe vs целом)
+            "цели ", // 3 цели на Днепр
+            "цели\n",
+            "целей", // количество целей
+            // heading / direction phrases (multi-word to avoid false positives)
+            // specific systems
             "с-300",
-            "s-300", // S-300 used as ground-attack missile
+            "s-300",
             "с-400",
-            "s-400",        // same in some cases
+            "s-400",
             "зенітн ракет", // UA: зенітна ракета (used as ballistic)
             "зенитн ракет", // RU
         ],
@@ -361,7 +405,7 @@ const THREAT_KEYWORDS: &[(ThreatKind, &[&str])] = &[
 // ───────────────────────── Urgency keywords ──────────────────────────────
 
 /// Keywords that signal "this is a repeated / additional wave" and should
-/// bypass dedup (once per source channel – see `DedupEntry::last_channel`).
+/// bypass dedup (once per source channel – see `DedupEntry::last_channel_id`).
 const URGENCY_KEYWORDS: &[&str] = &[
     // UA
     "повторно",  // repeated
@@ -394,18 +438,20 @@ fn is_urgent(lower: &str) -> bool {
 /// Phrases that mean "the entire country" — these alerts are relevant to
 /// everyone regardless of their configured oblast/city/district.
 const NATIONWIDE_KEYWORDS: &[&str] = &[
-    // UA
-    "по всій території", // по всій території України
-    "всю територію",     // на всю територію
-    "всієї території",   // для всієї території
-    "всіх областей",     // загроза для всіх областей
-    "всій україні",      // по всій Україні
-    // RU
-    "по всей территории", // по всей территории Украины
-    "всю территорию",
-    "всей территории",
-    "всех областей",
-    "всей украин", // по всей Украине
+    // UA — require explicit "України" / "Україні" to avoid regional FPs
+    "по всій території україни",
+    "всю територію україни",
+    "всієї території україни",
+    "по всій україні",
+    "всій україні",
+    "по всій країні", // sometimes used instead of "Україні"
+    // RU — require explicit "Украины" / "Украине"
+    "по всей территории украины",
+    "всю территорию украины",
+    "всей территории украины",
+    "по всей украине",
+    "всей украине",
+    "по всей стране",
 ];
 
 /// Returns `true` when the message is a nationwide alert that should bypass
@@ -530,9 +576,9 @@ struct DedupEntry {
     /// `true` when the cached message itself was an urgency-tagged one
     /// ("повторно", "додатково", …).
     was_urgent: bool,
-    /// Which channel produced the cached alert.  Used to distinguish a
-    /// genuine same-channel re-alert from cross-channel echo spam.
-    last_channel: String,
+    /// Stable channel peer-id.  Used to distinguish a genuine
+    /// same-channel re-alert from cross-channel echo spam.
+    last_channel_id: i64,
 }
 
 /// Stateful filter: detects threats, checks location, deduplicates.
@@ -581,9 +627,28 @@ impl AlertFilter {
             .retain(|_, e| now.duration_since(e.sent_at) < self.dedup_window);
     }
 
+    /// Back-compat wrapper used by tests. Prefer [`process_with_id`] when
+    /// you have a stable channel peer-id.
+    pub fn process(&mut self, channel_title: &str, text: &str) -> Option<String> {
+        // Use channel title hash as a pseudo-id so tests still exercise dedup.
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        channel_title.hash(&mut h);
+        self.process_with_id(h.finish() as i64, channel_title, text)
+    }
+
     /// Main entry point.  Returns `Some(formatted_alert)` when the message
     /// should be forwarded, or `None` to suppress.
-    pub fn process(&mut self, channel_title: &str, text: &str) -> Option<String> {
+    ///
+    /// `channel_id` must be a **stable** identifier for the source channel
+    /// (e.g. `peer.id().bare_id()` from grammers) so that dedup survives
+    /// channel title changes.
+    pub fn process_with_id(
+        &mut self,
+        channel_id: i64,
+        channel_title: &str,
+        text: &str,
+    ) -> Option<String> {
         let lower = text.to_lowercase();
         let lower_title = channel_title.to_lowercase();
         let combined = format!("{lower_title} {lower}");
@@ -606,9 +671,6 @@ impl AlertFilter {
         // 2. Check location / nationwide
         let nationwide = is_nationwide(&lower);
         let proximity = if nationwide {
-            // "по всій території України" — relevant to everyone.
-            // Use the user's location match if found, otherwise Oblast as
-            // minimum so it still gets through the location gate.
             let loc = self.location.check(&combined);
             if loc == Proximity::None {
                 Proximity::Oblast
@@ -628,21 +690,6 @@ impl AlertFilter {
         let urgent = is_urgent(&lower);
 
         // 4. Dedup
-        //
-        // Urgency handling: if the incoming message is urgent ("повторно" …)
-        // it bypasses dedup **once** (non-urgent → urgent transition), or
-        // when the *same channel* re-alerts (they wouldn't re-post for
-        // nothing).  A *different* channel echoing "повторно" with the same
-        // threat+proximity is cross-channel noise → suppressed.
-        //
-        // Decision matrix (entry = existing cache entry):
-        //   • No entry                              → forward
-        //   • entry exists, proximity upgrade        → forward
-        //   • entry exists, same/lower proximity
-        //       – urgent, entry NOT urgent            → forward (first re-alert)
-        //       – urgent, same channel as entry       → forward (source re-alerting)
-        //       – urgent, different channel, was_urgent → suppress (echo)
-        //       – not urgent                          → suppress
         self.evict();
         let now = Instant::now();
 
@@ -650,22 +697,18 @@ impl AlertFilter {
 
         if let Some(entry) = self.cache.get(&primary) {
             if proximity > entry.max_proximity {
-                // Proximity upgrade – always forward.
                 debug!(
                     "Dedup upgrade: {primary:?} {:?} → {proximity:?}",
                     entry.max_proximity
                 );
             } else if urgent && !entry.was_urgent {
-                // First urgent re-alert for this threat kind – forward.
                 debug!("Dedup: first urgent re-alert for {primary:?} – forwarding");
-            } else if urgent && entry.last_channel == channel_title {
-                // Same channel posting "повторно" again – genuine new wave.
+            } else if urgent && entry.last_channel_id == channel_id {
                 debug!("Dedup: same-channel re-alert for {primary:?} – forwarding");
             } else {
-                // Cross-channel echo or non-urgent duplicate → suppress.
                 debug!(
-                    "Dedup: {primary:?}/{proximity:?} suppressed (already sent {:?}, urgent={}, ch={})",
-                    entry.max_proximity, entry.was_urgent, entry.last_channel,
+                    "Dedup: {primary:?}/{proximity:?} suppressed (already sent {:?}, urgent={}, ch_id={})",
+                    entry.max_proximity, entry.was_urgent, entry.last_channel_id,
                 );
                 return None;
             }
@@ -679,11 +722,117 @@ impl AlertFilter {
                 sent_at: now,
                 max_proximity: prev_max.map_or(proximity, |p| proximity.max(p)),
                 was_urgent: urgent,
-                last_channel: channel_title.to_owned(),
+                last_channel_id: channel_id,
             },
         );
 
         // 5. Format
+        let alert = self.format(&threats, proximity, channel_title, text, urgent, nationwide);
+        Some(alert)
+    }
+
+    /// Async variant that runs the LLM secondary filter after keyword
+    /// detection but before formatting.  Falls back to keyword-only
+    /// when the LLM is disabled or errors out.
+    pub async fn process_with_llm(
+        &mut self,
+        channel_id: i64,
+        channel_title: &str,
+        text: &str,
+        llm: &crate::llm::LlmFilter,
+    ) -> Option<String> {
+        let lower = text.to_lowercase();
+
+        // Quick exit: no keywords at all.
+        let kw_threats = detect_threats(&lower);
+        if kw_threats.is_empty() {
+            debug!("No threat keywords found – skipping");
+            return None;
+        }
+
+        // AllClear fast-path (no LLM needed).
+        if kw_threats.contains(&ThreatKind::AllClear) && kw_threats.len() == 1 {
+            let alert = self.format(
+                &kw_threats,
+                Proximity::None,
+                channel_title,
+                text,
+                false,
+                false,
+            );
+            self.cache.clear();
+            return Some(alert);
+        }
+
+        // Location / nationwide.
+        let lower_title = channel_title.to_lowercase();
+        let combined = format!("{lower_title} {lower}");
+        let nationwide = is_nationwide(&lower);
+        let proximity = if nationwide {
+            let loc = self.location.check(&combined);
+            if loc == Proximity::None {
+                Proximity::Oblast
+            } else {
+                loc
+            }
+        } else {
+            self.location.check(&combined)
+        };
+
+        if proximity == Proximity::None && !self.forward_all_threats {
+            debug!("Threat detected but no location match – skipping");
+            return None;
+        }
+
+        // ── LLM verification (async) ──
+        let threats = if llm.is_enabled() {
+            let verified = llm.verify(text, &kw_threats, proximity, nationwide).await;
+            if verified.is_empty() {
+                debug!("LLM says not an active alert – suppressing");
+                return None;
+            }
+            verified
+        } else {
+            kw_threats
+        };
+
+        // Urgency + dedup (same as process_with_id).
+        let urgent = is_urgent(&lower);
+        self.evict();
+        let now = Instant::now();
+
+        let primary = threats.iter().copied().max_by_key(|k| k.specificity())?;
+
+        if let Some(entry) = self.cache.get(&primary) {
+            if proximity > entry.max_proximity {
+                debug!(
+                    "Dedup upgrade: {primary:?} {:?} → {proximity:?}",
+                    entry.max_proximity
+                );
+            } else if urgent && !entry.was_urgent {
+                debug!("Dedup: first urgent re-alert for {primary:?} – forwarding");
+            } else if urgent && entry.last_channel_id == channel_id {
+                debug!("Dedup: same-channel re-alert for {primary:?} – forwarding");
+            } else {
+                debug!(
+                    "Dedup: {primary:?}/{proximity:?} suppressed (already sent {:?}, urgent={}, ch_id={})",
+                    entry.max_proximity, entry.was_urgent, entry.last_channel_id,
+                );
+                return None;
+            }
+        }
+
+        let prev_max = self.cache.get(&primary).map(|e| e.max_proximity);
+        self.cache.insert(
+            primary,
+            DedupEntry {
+                sent_at: now,
+                max_proximity: prev_max.map_or(proximity, |p| proximity.max(p)),
+                was_urgent: urgent,
+                last_channel_id: channel_id,
+            },
+        );
+
         let alert = self.format(&threats, proximity, channel_title, text, urgent, nationwide);
         Some(alert)
     }
@@ -989,7 +1138,143 @@ mod tests {
         assert!(threats.contains(&ThreatKind::Other));
     }
 
-    // ── All clear (expanded) ──
+    // ── False positive regression tests ──
+
+    #[test]
+    fn no_false_positive_analytical_report() {
+        // This is a calm situation report from Aeris Rimor – NOT an active
+        // alert. Previously "пускові" triggered Missile via "пуск" stem.
+        let threats = detect_threats(
+            "проявів з того моменту особливо помічено не було. \
+             очікуваними є до 2:30. бо в цей період крайній відрізок \
+             коли може відбутись виліт са з оленья, аби встигнути \
+             на пускові зони згідно поточної тактики застосування. \
+             також нагадую, що у випадку атак на центр країни, ворог \
+             може починати основну фазу вже вночі. пильнуємо ще \
+             щонайменше до 2 годин ночі. але поки все відносно спокійно.",
+        );
+        // Should NOT detect any threat – this is informational text.
+        assert!(
+            threats.is_empty(),
+            "False positive on analytical report: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_missile_on_napryamku() {
+        // "у напрямку Кілія" is a direction, not a missile indicator.
+        // Only Shahed (via "бпла") should match.
+        let threats = detect_threats("група ~10х бпла у напрямку кілія/ізмаїл, одещина");
+        assert!(threats.contains(&ThreatKind::Shahed));
+        assert!(
+            !threats.contains(&ThreatKind::Missile),
+            "\"напрямку\" should not trigger Missile: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_missile_on_puskovi() {
+        // "пускові зони" is analytical, not an active launch.
+        let threats = detect_threats("встигнути на пускові зони");
+        assert!(
+            threats.is_empty(),
+            "\"пускові\" should not trigger: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_missile_on_tsilkom() {
+        // "цілком спокійно" = "completely calm" – not a target/missile.
+        let threats = detect_threats("цілком спокійно, загрози немає");
+        assert!(
+            !threats.contains(&ThreatKind::Missile),
+            "\"цілком\" should not trigger Missile: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_missile_on_tseliy() {
+        // "в целом" = "in general" – not a target/missile.
+        let threats = detect_threats("в целом ситуация спокойная");
+        assert!(
+            !threats.contains(&ThreatKind::Missile),
+            "\"целом\" should not trigger Missile: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_missile_on_tselikom() {
+        // "целиком" = "completely" – not a target/missile.
+        let threats = detect_threats("целиком уничтожен объект");
+        assert!(
+            !threats.contains(&ThreatKind::Missile),
+            "\"целиком\" should not trigger Missile: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn still_detects_real_targets() {
+        // Real target messages must still match.
+        let t1 = detect_threats("ціль на київ!");
+        assert!(t1.contains(&ThreatKind::Missile), "\"ціль на\" must match");
+
+        let t2 = detect_threats("2 цілі на захід");
+        assert!(t2.contains(&ThreatKind::Missile), "\"цілі на\" must match");
+
+        let t3 = detect_threats("цель на киев");
+        assert!(t3.contains(&ThreatKind::Missile), "\"цель на\" must match");
+
+        let t4 = detect_threats("3 цели на днепр");
+        assert!(t4.contains(&ThreatKind::Missile), "\"цели \" must match");
+
+        // End-of-string / end-of-line
+        let t5 = detect_threats("нова ціль");
+        assert!(
+            t5.contains(&ThreatKind::Missile),
+            "\"ціль\" at end must match"
+        );
+
+        let t6 = detect_threats("ще одна ціль\nна захід");
+        assert!(t6.contains(&ThreatKind::Missile), "\"ціль\\n\" must match");
+    }
+
+    #[test]
+    fn process_skips_analytical_report() {
+        // Full integration test: the Aeris Rimor message should be
+        // completely skipped (no threat keywords → None).
+        let mut filter = kyiv_filter();
+        let r = filter.process(
+            "Aeris Rimor",
+            "Проявів з того моменту особливо помічено не було.\n\
+             Очікуваними є до 2:30. Бо в цей період крайній відрізок \
+             коли може відбутись виліт СА з Оленья, аби встигнути \
+             на пускові зони згідно поточної тактики застосування.\n\
+             Також нагадую, що у випадку атак на центр країни, ворог \
+             може починати основну фазу вже вночі.\n\
+             Пильнуємо ще щонайменше до 2 годин ночі. Але поки все \
+             відносно спокійно. Не рахуючи схід та Одещину.",
+        );
+        assert!(r.is_none(), "Analytical report should NOT be forwarded");
+    }
+
+    #[test]
+    fn process_drone_no_missile_tag() {
+        // The BpLA message should only get Shahed tag, NOT Missile.
+        let mut filter = kyiv_filter();
+        // Use a filter that matches Одеська for test purposes
+        filter.forward_all_threats = true;
+        let r = filter.process(
+            "monitor",
+            "⚠️ Група ~10х БпЛА у напрямку Кілія/Ізмаїл, Одещина",
+        );
+        assert!(r.is_some());
+        let text = r.unwrap();
+        assert!(text.contains("Шахед"), "Should detect Shahed");
+        assert!(
+            !text.contains("Ракета"),
+            "Should NOT detect Missile from напрямку"
+        );
+    }
 
     #[test]
     fn detects_all_clear_ua() {
@@ -1357,6 +1642,14 @@ mod tests {
     #[test]
     fn not_nationwide_normal() {
         assert!(!is_nationwide("баллистика на киев!"));
+    }
+
+    #[test]
+    fn not_nationwide_regional_territory() {
+        // "по всій території області" should NOT match —
+        // it's regional, not nationwide.
+        assert!(!is_nationwide("по всій території харківської області"));
+        assert!(!is_nationwide("по всей территории области"));
     }
 
     #[test]
