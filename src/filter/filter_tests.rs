@@ -1197,6 +1197,108 @@ mod tests {
     }
 
     #[test]
+    fn micro_local_ping_prefers_shahed_over_inferred_missile_types() {
+        let mut filter = kyiv_filter();
+        let ch: i64 = 730001;
+        filter.forward_all_threats = true;
+        filter.dedup_window = Duration::from_secs(0);
+        filter.location.district.push("терем".into());
+        filter.location.district.push("жулян".into());
+
+        // Seed conflicting missile context.
+        let _ = filter.process_with_id(
+            ch,
+            "Чисте небо Київська область та Київ.",
+            "Крилата з сумської в полтавську",
+        );
+        let _ = filter.process_with_id(ch, "Kyiv AirDefense 🌇", "‼️ Загроза балістики з Криму");
+
+        let r1 = filter.process_with_id(ch, "Чисте небо Київська область та Київ.", "Теремки 🤯");
+        assert!(r1.is_some());
+        let t1 = r1.unwrap();
+        assert!(
+            t1.contains("Шахед"),
+            "micro local ping should be treated as Shahed: {t1}"
+        );
+        assert!(!t1.contains("Крилата ракета"));
+        assert!(!t1.contains("Балістика"));
+
+        let r2 = filter.process_with_id(ch, "Kyiv AirDefense 🌇", "Жуляни!!!!");
+        assert!(r2.is_some());
+        let t2 = r2.unwrap();
+        assert!(
+            t2.contains("Шахед"),
+            "micro local ping should be treated as Shahed: {t2}"
+        );
+        assert!(!t2.contains("Крилата ракета"));
+        assert!(!t2.contains("Балістика"));
+    }
+
+    #[test]
+    fn shahed_district_change_is_not_dedup_suppressed() {
+        let mut filter = kyiv_filter();
+        filter.location.district.push("терем".into());
+        filter.location.district.push("жулян".into());
+
+        let r1 = filter.process("Kyiv AirDefense 🌇", "Шахед біля Теремків");
+        assert!(r1.is_some());
+
+        // Same threat+proximity, but district hint changed -> should pass.
+        let r2 = filter.process("Kyiv AirDefense 🌇", "Шахед біля Жулян");
+        assert!(
+            r2.is_some(),
+            "district shift for Shahed must bypass dedup suppression"
+        );
+    }
+
+    #[test]
+    fn nonlocal_akhyrka_lebedyn_cruise_does_not_become_local_city() {
+        let mut filter = kyiv_filter();
+        let ch: i64 = 740001;
+
+        // Seed local context so fallback would have a chance to misfire.
+        let _ = filter.process_with_id(
+            ch,
+            "Николаевский Ванёк",
+            "2 пролетают Обухов в сторону Боярки/Киева",
+        );
+        let r = filter.process_with_id(
+            ch,
+            "Николаевский Ванёк",
+            "первые крылатые ракеты залетают курсом на/через Ахтырку/Лебедин",
+        );
+        assert!(
+            r.is_none(),
+            "explicit non-local cruise message must not inherit local Kyiv proximity"
+        );
+    }
+
+    #[test]
+    fn regional_digest_without_aircraft_markers_defaults_to_shahed() {
+        let mut filter = kyiv_filter();
+        let ch: i64 = 740002;
+        filter.forward_all_threats = true;
+
+        // Seed aircraft context in same channel.
+        let _ = filter.process_with_id(ch, "Розвідка України", "⚠️ Су-57 в Бєлгородській області");
+        let r = filter.process_with_id(
+            ch,
+            "Розвідка України",
+            "Київщина: 5 на Наливайківку, 1 на Чабани\n\nЧернігівщина: ~30 в районі Корюківка - Борзна\n\nЧеркащина: ~20 далі на Жашків / Київщину\n\nПолтавщина: 1 біля Машівки",
+        );
+        assert!(r.is_some());
+        let text = r.unwrap();
+        assert!(
+            text.contains("Шахед"),
+            "regional movement digest should default to Shahed, not Aircraft: {text}"
+        );
+        assert!(
+            !text.contains("Авіація"),
+            "digest without aircraft markers must not be labeled as Aircraft: {text}"
+        );
+    }
+
+    #[test]
     fn context_infers_cruise_missile_from_recent_message() {
         let mut filter = kyiv_filter();
         let channel_id = 789012;

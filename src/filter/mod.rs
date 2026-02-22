@@ -41,6 +41,71 @@ fn has_live_movement_markers(lower: &str) -> bool {
     markers.iter().any(|m| lower.contains(m))
 }
 
+/// Very short locality-only pings in local channels (e.g. "Жуляни!!!!",
+/// "Теремки 🤯") are usually drone sighting updates. Inferring missile type
+/// from previous context here is too noisy.
+fn is_micro_local_ping(lower: &str) -> bool {
+    let trimmed = lower.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Explicit threat words should use normal detection/inference paths.
+    if has_live_movement_markers(trimmed)
+        || trimmed.contains("ракет")
+        || trimmed.contains("баліст")
+        || trimmed.contains("баллист")
+        || trimmed.contains("циркон")
+        || trimmed.contains("крылат")
+        || trimmed.contains("крилат")
+        || trimmed.contains("шахед")
+        || trimmed.contains("бпла")
+        || trimmed.contains("дрон")
+    {
+        return false;
+    }
+    let token_count = trimmed
+        .split_whitespace()
+        .filter(|t| t.chars().any(|c| c.is_alphabetic()))
+        .count();
+    token_count <= 2
+}
+
+fn has_aircraft_markers(lower: &str) -> bool {
+    let markers = [
+        "авіаці",
+        "авиаци",
+        "су-",
+        "міг-",
+        "миг-",
+        "ту-",
+        "борт",
+        "зліт",
+        "взлет",
+        "взлёт",
+    ];
+    markers.iter().any(|m| lower.contains(m))
+}
+
+fn is_regional_swarm_digest(lower: &str) -> bool {
+    let regions = [
+        "київщин",
+        "киевщин",
+        "черніг",
+        "черниг",
+        "черкас",
+        "полтав",
+        "сумщ",
+        "житомир",
+        "кіровоград",
+        "кировоград",
+    ];
+    let region_hits = regions.iter().filter(|r| lower.contains(**r)).count();
+    let colons = lower.matches(':').count();
+    let digits = lower.chars().filter(|c| c.is_ascii_digit()).count();
+    let na_hits = lower.matches(" на ").count();
+    region_hits >= 2 && (colons >= 2 || digits >= 4 || na_hits >= 4)
+}
+
 /// Broad stems for non-local Ukrainian regions/cities that often appear in
 /// trajectory messages. Used to prevent local-context fallback from
 /// re-labeling clearly non-local alerts as local.
@@ -85,6 +150,13 @@ const NONLOCAL_REGION_STEMS: &[&str] = &[
     "крим",
     "крыма",
     "криму",
+    "ахтыр",
+    "охтир",
+    "лебедин",
+    "кроп ",
+    "кроп!",
+    "кроп,",
+    "кроп.",
 ];
 
 /// Returns `true` for long recap/statistics posts that list launch totals,
@@ -610,6 +682,9 @@ struct DedupEntry {
     /// Stable channel peer-id.  Used to distinguish a genuine
     /// same-channel re-alert from cross-channel echo spam.
     last_channel_id: i64,
+    /// Last matched geo hint (district/city/oblast keyword stem) used to
+    /// allow meaningful same-threat updates when location shifts.
+    last_geo_hint: Option<String>,
 }
 
 fn threat_bit(kind: ThreatKind) -> u16 {
@@ -882,9 +957,19 @@ impl AlertFilter {
 
             // 2b. Location present or urgent, but no threat → infer threat from context.
             if threats.is_empty() && (proximity != Proximity::None || urgent) {
-                if let Some(inferred) = context.infer_recent_threat() {
-                    debug!("Inferred {inferred:?} from context (no threat keyword)");
-                    threats.push(inferred);
+                if proximity == Proximity::District && is_micro_local_ping(lower) {
+                    debug!("Micro local ping without explicit threat -> default Shahed");
+                    threats.push(ThreatKind::Shahed);
+                } else if is_regional_swarm_digest(lower) && !has_aircraft_markers(lower) {
+                    debug!("Regional movement digest without explicit type -> default Shahed");
+                    threats.push(ThreatKind::Shahed);
+                } else if let Some(inferred) = context.infer_recent_threat() {
+                    if inferred == ThreatKind::Aircraft && !has_aircraft_markers(lower) {
+                        debug!("Skipping Aircraft context inference without aircraft markers");
+                    } else {
+                        debug!("Inferred {inferred:?} from context (no threat keyword)");
+                        threats.push(inferred);
+                    }
                 }
             }
 
@@ -1140,6 +1225,7 @@ impl AlertFilter {
         let urgent = is_urgent(lower);
         self.evict();
         let now = Instant::now();
+        let geo_hint = self.extract_geo_hint(lower, proximity);
 
         let primary = threats.iter().copied().max_by_key(|k| k.specificity())?;
         let signature = threat_signature(threats);
@@ -1169,6 +1255,15 @@ impl AlertFilter {
                     );
                     return None;
                 }
+            } else if primary == ThreatKind::Shahed
+                && proximity == Proximity::District
+                && geo_hint.is_some()
+                && entry.last_geo_hint != geo_hint
+            {
+                debug!(
+                    "Dedup: Shahed district geo shift {:?} -> {:?} – forwarding",
+                    entry.last_geo_hint, geo_hint
+                );
             } else {
                 debug!(
                     "Dedup: {primary:?}/{proximity:?} suppressed (already sent {:?}, urgent={}, ch_id={})",
@@ -1199,11 +1294,35 @@ impl AlertFilter {
                     self.cache.get(&primary).and_then(|e| e.last_urgent_at)
                 },
                 last_channel_id: channel_id,
+                last_geo_hint: geo_hint,
             },
         );
 
         let alert = self.format(threats, proximity, channel_title, text, urgent, nationwide);
         Some(alert)
+    }
+
+    fn extract_geo_hint(&self, lower: &str, proximity: Proximity) -> Option<String> {
+        fn find_kw(lower: &str, kws: &[String]) -> Option<String> {
+            for kw in kws {
+                let matched = if kw.contains(char::is_whitespace) {
+                    LocationConfig::contains_with_boundary(lower, kw)
+                } else {
+                    lower.contains(kw)
+                };
+                if matched {
+                    return Some(kw.clone());
+                }
+            }
+            None
+        }
+
+        match proximity {
+            Proximity::District => find_kw(lower, &self.location.district),
+            Proximity::City => find_kw(lower, &self.location.city),
+            Proximity::Oblast => find_kw(lower, &self.location.oblast),
+            Proximity::None => None,
+        }
     }
 
     fn format(
