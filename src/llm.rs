@@ -34,7 +34,7 @@
 //! LLM_MODEL=qwen2.5
 //! ```
 
-use crate::filter::{Proximity, ThreatKind};
+use crate::filter::{Proximity, threat_kind::ThreatKind};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -49,19 +49,20 @@ You receive a Telegram message (Ukrainian or Russian) from an alert channel, tog
 Your job: decide which threats represent an ACTIVE, ONGOING, or IMMINENT threat RIGHT NOW versus analytical / historical / forecast / news / recap text.
 
 Rules:
-- Only include a threat if the message describes something happening NOW or about to happen (launch detected, drones in flight, missiles heading to a region, etc.).
+- Only include a threat if the message describes something happening NOW (launch detected, drones in flight, missiles heading to a region, etc.).
 - Remove threats that were triggered by analytical context (e.g. "пускові зони" is about launch zones in general, not an active launch).
 - If the message is purely informational, a recap, statistics, a forecast, or a calm situation report, return an empty threats list.
-- Do NOT add threats that the keyword filter missed — only confirm or remove.
+- Do NOT add threats that the keyword filter missed — only confirm or remove. Do NOT duplicate.
 - AllClear ("відбій"/"отбой") should always be confirmed if the message genuinely announces threat cessation.
 - When in doubt, confirm the keyword guess (better safe than sorry)
-- Do not categorize potecial threats, only factual
+- Do not categorize potencial threats, only factual
+- Drone != Ballistic. Ballistic = Ballistic missiles
 
 Reply ONLY with a JSON object, nothing else:
-{"threats": ["Ballistic", ...], "reasoning": ["one sentence why for every choise",..]}
+{"threats": ["Ballistic", ...], "reasoning": ["Why",...]}
 
 Valid threat values: Ballistic, Hypersonic, CruiseMissile, GuidedBomb, Missile, Shahed, ReconDrone, Aircraft, AllClear
-Empty list = not an active alert: {"threats": [], "reasoning": ["..."]}
+Empty list = not an active alert: {"threats": [], "reasoning": []}
 "#;
 
 // ─────────────────────────── Data types ──────────────────────────────────
@@ -170,10 +171,6 @@ impl LlmFilter {
         proximity: Proximity,
         nationwide: bool,
     ) -> Vec<ThreatKind> {
-        if !self.enabled {
-            return keyword_threats.to_vec();
-        }
-
         let threats_str: String = keyword_threats
             .iter()
             .map(|t| t.variant_name())
@@ -181,7 +178,11 @@ impl LlmFilter {
             .join(", ");
 
         // Truncate to ~800 chars to keep prompt short and inference fast.
-        let truncated = if text.len() > 800 { &text[..800] } else { text };
+        let truncated = if text.chars().count() > 800 {
+            text.chars().take(800).collect()
+        } else {
+            text.to_string()
+        };
 
         let user_content = format!(
             "Message from channel:\n```\n{truncated}\n```\n\
@@ -210,7 +211,7 @@ impl LlmFilter {
                 },
             ],
             temperature: 0.0,
-            max_tokens: 150,
+            max_tokens: 500,
             response_format: Some(ResponseFormat {
                 r#type: "json_object",
             }),

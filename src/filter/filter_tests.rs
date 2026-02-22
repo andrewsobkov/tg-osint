@@ -1,0 +1,1099 @@
+// ─────────────────────────────── Tests ───────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, time::Duration};
+
+    //use crate::filter::{AlertFilter, LocationConfig};
+
+    use crate::filter::{detect_threats, *};
+
+    // ── Threat detection (UA) ──
+
+    #[test]
+    fn detects_ballistic_ua() {
+        let threats = detect_threats("увага! балістична загроза з півдня");
+        assert!(threats.contains(&ThreatKind::Ballistic));
+        assert!(!threats.contains(&ThreatKind::Missile));
+    }
+
+    #[test]
+    fn detects_ballistic_ua_noun() {
+        let threats = detect_threats("загроза балістики з брянська");
+        assert!(threats.contains(&ThreatKind::Ballistic));
+    }
+
+    #[test]
+    fn detects_shahed_ua() {
+        let threats = detect_threats("шахеди в напрямку харкова");
+        assert!(threats.contains(&ThreatKind::Shahed));
+    }
+
+    #[test]
+    fn detects_generic_missile_ua() {
+        let threats = detect_threats("пуск ракети з півдня");
+        assert!(threats.contains(&ThreatKind::Missile));
+    }
+
+    #[test]
+    fn detects_target_with_context() {
+        // "ціль"/"цель" (target) now requires context to infer threat type.
+        // Without context, it won't trigger from keywords alone.
+        let threats = detect_threats("ще ціль на київ");
+        assert!(!threats.contains(&ThreatKind::Missile));
+
+        // But with "ракет" keyword, it should still work
+        let threats2 = detect_threats("2 ракети на київ");
+        assert!(threats2.contains(&ThreatKind::Missile));
+    }
+
+    #[test]
+    fn detects_iskander_ua() {
+        let threats = detect_threats("можливі пуски ракет типу «іскандер-м/кн-23/с-300");
+        assert!(threats.contains(&ThreatKind::Ballistic));
+        assert!(!threats.contains(&ThreatKind::Missile));
+    }
+
+    // ── Threat detection (RU) ──
+
+    #[test]
+    fn detects_ballistic_ru() {
+        let threats = detect_threats("баллистика на киев!");
+        assert!(threats.contains(&ThreatKind::Ballistic));
+        assert!(!threats.contains(&ThreatKind::Missile));
+    }
+
+    #[test]
+    fn detects_ballistic_ru_plural() {
+        let threats = detect_threats("4 баллистики на днепр");
+        assert!(threats.contains(&ThreatKind::Ballistic));
+    }
+
+    #[test]
+    fn detects_moped_ru() {
+        let threats = detect_threats("8 мопедов летят на днепр");
+        assert!(threats.contains(&ThreatKind::Shahed));
+    }
+
+    #[test]
+    fn detects_missile_ru() {
+        let threats = detect_threats("2 ракеты на киев");
+        assert!(threats.contains(&ThreatKind::Missile));
+    }
+
+    #[test]
+    fn detects_mixed_ru() {
+        let threats = detect_threats("10 мопедов и 4 баллистики на днепр");
+        assert!(threats.contains(&ThreatKind::Shahed));
+        assert!(threats.contains(&ThreatKind::Ballistic));
+        assert!(!threats.contains(&ThreatKind::Missile));
+    }
+
+    // ── New categories: Hypersonic ──
+
+    #[test]
+    fn detects_hypersonic_ua() {
+        let threats = detect_threats("гіперзвукова ракета з півдня");
+        assert!(threats.contains(&ThreatKind::Hypersonic));
+        assert!(!threats.contains(&ThreatKind::Missile)); // suppressed
+    }
+
+    #[test]
+    fn detects_zircon_ru() {
+        let threats = detect_threats("пуск циркона з акваторії чорного моря");
+        assert!(threats.contains(&ThreatKind::Hypersonic));
+    }
+
+    // ── New categories: Guided bomb (КАБ) ──
+
+    #[test]
+    fn detects_kab_ua() {
+        let threats = detect_threats("скидання каб-500 по позиціях");
+        assert!(threats.contains(&ThreatKind::GuidedBomb));
+    }
+
+    #[test]
+    fn detects_fab_ru() {
+        let threats = detect_threats("сброс фаб-500 по харькову");
+        assert!(threats.contains(&ThreatKind::GuidedBomb));
+    }
+
+    #[test]
+    fn detects_umpb() {
+        let threats = detect_threats("умпб в напрямку сумської області");
+        assert!(threats.contains(&ThreatKind::GuidedBomb));
+    }
+
+    #[test]
+    fn detects_guided_bomb_ua_long() {
+        let threats = detect_threats("загроза застосування керованих авіабомб");
+        assert!(threats.contains(&ThreatKind::GuidedBomb));
+    }
+
+    // ── Expanded Shahed keywords ──
+
+    #[test]
+    fn detects_bezpilotnik_ua() {
+        let threats = detect_threats("безпілотники в напрямку києва");
+        assert!(threats.contains(&ThreatKind::Shahed));
+    }
+
+    #[test]
+    fn detects_gazonokosilka() {
+        // slang "газонокосилка" (lawnmower) = Shahed
+        let threats = detect_threats("газонокосилки на підльоті до київської області");
+        assert!(threats.contains(&ThreatKind::Shahed));
+    }
+
+    #[test]
+    fn detects_kamikaze_drone() {
+        let threats = detect_threats("дрон-камікадзе над полтавською областю");
+        assert!(threats.contains(&ThreatKind::Shahed));
+    }
+
+    // ── Expanded Aircraft keywords ──
+
+    #[test]
+    fn detects_strategic_aviation_ua() {
+        let threats = detect_threats("зліт стратегічної авіації з аеродрому енгельс");
+        assert!(threats.contains(&ThreatKind::Aircraft));
+    }
+
+    #[test]
+    fn detects_takeoff_ru() {
+        let threats = detect_threats("взлёт ту-95 с аэродрома энгельс");
+        assert!(threats.contains(&ThreatKind::Aircraft));
+    }
+
+    #[test]
+    fn detects_su57() {
+        let threats = detect_threats("су-57 в повітрі");
+        assert!(threats.contains(&ThreatKind::Aircraft));
+    }
+
+    // ── Expanded generic missile ──
+
+    #[test]
+    fn detects_launch_ru() {
+        let threats = detect_threats("запуск ракет з акваторії");
+        assert!(threats.contains(&ThreatKind::Missile));
+    }
+
+    #[test]
+    fn detects_heading_to_ua() {
+        let threats = detect_threats("ракети курсом на захід");
+        assert!(threats.contains(&ThreatKind::Missile));
+    }
+
+    // ── Expanded Other (catch-all) ──
+
+    #[test]
+    fn detects_debris_ua() {
+        let threats = detect_threats("падіння уламків у шевченківському районі");
+        assert!(threats.contains(&ThreatKind::Other));
+    }
+
+    #[test]
+    fn detects_shelter_ua() {
+        let threats = detect_threats("терміново в укриття!");
+        assert!(threats.contains(&ThreatKind::Other));
+    }
+
+    #[test]
+    fn detects_cluster_munition_ru() {
+        let threats = detect_threats("кассетные боеприпасы по области");
+        assert!(threats.contains(&ThreatKind::Other));
+    }
+
+    // ── False positive regression tests ──
+
+    #[test]
+    fn no_false_positive_analytical_report() {
+        // This is a calm situation report from Aeris Rimor – NOT an active
+        // alert. Previously "пускові" triggered Missile via "пуск" stem.
+        let threats = detect_threats(
+            "проявів з того моменту особливо помічено не було. \
+             очікуваними є до 2:30. бо в цей період крайній відрізок \
+             коли може відбутись виліт са з оленья, аби встигнути \
+             на пускові зони згідно поточної тактики застосування. \
+             також нагадую, що у випадку атак на центр країни, ворог \
+             може починати основну фазу вже вночі. пильнуємо ще \
+             щонайменше до 2 годин ночі. але поки все відносно спокійно.",
+        );
+        // Should NOT detect any threat – this is informational text.
+        assert!(
+            threats.is_empty(),
+            "False positive on analytical report: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_missile_on_napryamku() {
+        // "у напрямку Кілія" is a direction, not a missile indicator.
+        // Only Shahed (via "бпла") should match.
+        let threats = detect_threats("група ~10х бпла у напрямку кілія/ізмаїл, одещина");
+        assert!(threats.contains(&ThreatKind::Shahed));
+        assert!(
+            !threats.contains(&ThreatKind::Missile),
+            "\"напрямку\" should not trigger Missile: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_missile_on_puskovi() {
+        // "пускові зони" is analytical, not an active launch.
+        let threats = detect_threats("встигнути на пускові зони");
+        assert!(
+            threats.is_empty(),
+            "\"пускові\" should not trigger: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_missile_on_tsilkom() {
+        // "цілком спокійно" = "completely calm" – not a target/missile.
+        let threats = detect_threats("цілком спокійно, загрози немає");
+        assert!(
+            !threats.contains(&ThreatKind::Missile),
+            "\"цілком\" should not trigger Missile: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_missile_on_tseliy() {
+        // "в целом" = "in general" – not a target/missile.
+        let threats = detect_threats("в целом ситуация спокойная");
+        assert!(
+            !threats.contains(&ThreatKind::Missile),
+            "\"целом\" should not trigger Missile: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_missile_on_tselikom() {
+        // "целиком" = "completely" – not a target/missile.
+        let threats = detect_threats("целиком уничтожен объект");
+        assert!(
+            !threats.contains(&ThreatKind::Missile),
+            "\"целиком\" should not trigger Missile: {threats:?}"
+        );
+    }
+
+    #[test]
+    fn still_detects_real_targets() {
+        // "ціль"/"цель" patterns are handled by context inference (not raw
+        // keyword detection).  Verify they are caught via process_with_id,
+        // which calls infer_target_threat (defaults to Missile when there
+        // is no prior context).
+        let mut filter = kyiv_filter();
+        filter.forward_all_threats = true; // bypass location for these checks
+
+        // Each call uses a different channel_id so dedup doesn't interfere.
+        let r1 = filter.process_with_id(1, "Ch", "ціль на київ!");
+        assert!(r1.is_some(), "\"ціль на\" must match via context inference");
+
+        let r2 = filter.process_with_id(2, "Ch", "2 цілі на захід");
+        assert!(r2.is_some(), "\"цілі на\" must match via context inference");
+
+        let r3 = filter.process_with_id(3, "Ch", "цель на киев");
+        assert!(r3.is_some(), "\"цель на\" must match via context inference");
+
+        let r4 = filter.process_with_id(4, "Ch", "3 цели на днепр");
+        assert!(r4.is_some(), "\"цели \" must match via context inference");
+
+        // End-of-string / end-of-line
+        let r5 = filter.process_with_id(5, "Ch", "нова ціль");
+        assert!(
+            r5.is_some(),
+            "\"ціль\" at end must match via context inference"
+        );
+
+        let r6 = filter.process_with_id(6, "Ch", "ще одна ціль\nна захід");
+        assert!(r6.is_some(), "\"ціль\\n\" must match via context inference");
+    }
+
+    #[test]
+    fn process_skips_analytical_report() {
+        // Full integration test: the Aeris Rimor message should be
+        // completely skipped (no threat keywords → None).
+        let mut filter = kyiv_filter();
+        let r = filter.process(
+            "Aeris Rimor",
+            "Проявів з того моменту особливо помічено не було.\n\
+             Очікуваними є до 2:30. Бо в цей період крайній відрізок \
+             коли може відбутись виліт СА з Оленья, аби встигнути \
+             на пускові зони згідно поточної тактики застосування.\n\
+             Також нагадую, що у випадку атак на центр країни, ворог \
+             може починати основну фазу вже вночі.\n\
+             Пильнуємо ще щонайменше до 2 годин ночі. Але поки все \
+             відносно спокійно. Не рахуючи схід та Одещину.",
+        );
+        assert!(r.is_none(), "Analytical report should NOT be forwarded");
+    }
+
+    #[test]
+    fn process_drone_no_missile_tag() {
+        // The BpLA message should only get Shahed tag, NOT Missile.
+        let mut filter = kyiv_filter();
+        // Use a filter that matches Одеська for test purposes
+        filter.forward_all_threats = true;
+        let r = filter.process(
+            "monitor",
+            "⚠️ Група ~10х БпЛА у напрямку Кілія/Ізмаїл, Одещина",
+        );
+        assert!(r.is_some());
+        let text = r.unwrap();
+        assert!(text.contains("Шахед"), "Should detect Shahed");
+        assert!(
+            !text.contains("Ракета"),
+            "Should NOT detect Missile from напрямку"
+        );
+    }
+
+    #[test]
+    fn detects_all_clear_ua() {
+        let threats = detect_threats("відбій тривоги");
+        assert!(threats.contains(&ThreatKind::AllClear));
+    }
+
+    #[test]
+    fn detects_all_clear_ru() {
+        let threats = detect_threats("отбой тревоги");
+        assert!(threats.contains(&ThreatKind::AllClear));
+    }
+
+    #[test]
+    fn detects_all_clear_ua_sky() {
+        let threats = detect_threats("чисте небо над київською областю");
+        assert!(threats.contains(&ThreatKind::AllClear));
+    }
+
+    #[test]
+    fn detects_all_clear_ru_sky() {
+        let threats = detect_threats("чистое небо, угроза миновала");
+        assert!(threats.contains(&ThreatKind::AllClear));
+    }
+
+    // ── Urgency (expanded) ──
+
+    #[test]
+    fn urgency_povtorno_ru() {
+        assert!(is_urgent("повторно баллистика на киев!"));
+    }
+
+    #[test]
+    fn urgency_povtorno_ua() {
+        assert!(is_urgent("повторно балістика на київ!"));
+    }
+
+    #[test]
+    fn urgency_additionally_ua() {
+        assert!(is_urgent("додатково загроза балістики з таганрога"));
+    }
+
+    #[test]
+    fn urgency_more_targets() {
+        assert!(is_urgent("ще ціль на київ"));
+    }
+
+    #[test]
+    fn urgency_new_wave_ua() {
+        assert!(is_urgent("нова хвиля шахедів"));
+    }
+
+    #[test]
+    fn urgency_new_wave_ru() {
+        assert!(is_urgent("новая волна дронов"));
+    }
+
+    #[test]
+    fn urgency_terminovo_ua() {
+        assert!(is_urgent("терміново в укриття!"));
+    }
+
+    #[test]
+    fn urgency_srochno_ru() {
+        assert!(is_urgent("срочно в укрытие!"));
+    }
+
+    #[test]
+    fn no_urgency_in_normal_msg() {
+        assert!(!is_urgent("баллистика на киев!"));
+    }
+
+    // ── Proximity ──
+
+    #[test]
+    fn proximity_city_ru() {
+        let filter = kyiv_filter();
+        let p = filter.location.check("2 ракеты на киев");
+        assert_eq!(p, Proximity::City);
+    }
+
+    #[test]
+    fn proximity_city_ua() {
+        let filter = kyiv_filter();
+        let p = filter.location.check("ще ціль на київ");
+        assert_eq!(p, Proximity::City);
+    }
+
+    #[test]
+    fn proximity_satellite_city() {
+        let filter = kyiv_filter();
+        let p = filter
+            .location
+            .check("баллистика на киев/васильков !!! 2 ракеты");
+        assert_eq!(p, Proximity::City);
+    }
+
+    #[test]
+    fn proximity_district() {
+        let filter = kharkiv_filter();
+        let p = filter.location.check("вибухи у київському районі харкова");
+        assert_eq!(p, Proximity::District);
+    }
+
+    #[test]
+    fn proximity_city_kharkiv() {
+        let filter = kharkiv_filter();
+        let p = filter.location.check("дрони в напрямку харкова");
+        assert_eq!(p, Proximity::City);
+    }
+
+    #[test]
+    fn proximity_oblast_isolated() {
+        // Test oblast with a config where city doesn't collide with oblast root
+        let loc = LocationConfig {
+            oblast: vec!["харківськ".into()],
+            city: vec!["ізюм".into()],
+            district: vec![],
+        };
+        let p = loc.check("загроза для харківської області");
+        assert_eq!(p, Proximity::Oblast);
+    }
+
+    // ── Integration: process() ──
+
+    #[test]
+    fn no_match_skipped() {
+        let mut filter = kyiv_filter();
+        let result = filter.process("Канал", "баллистика на одессу");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn matching_message_forwarded() {
+        let mut filter = kyiv_filter();
+        let result = filter.process("Alerts", "баллистика на киев!");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn dedup_suppresses_duplicate() {
+        let mut filter = kyiv_filter();
+        let r1 = filter.process("Ch1", "2 ракеты на киев");
+        assert!(r1.is_some());
+        // Same threat kind + same proximity → suppressed
+        let r2 = filter.process("Ch2", "ракеты летят на киев");
+        assert!(r2.is_none());
+    }
+
+    #[test]
+    fn dedup_allows_proximity_upgrade() {
+        let mut filter = kharkiv_filter();
+        let r1 = filter.process("Ch1", "шахеди увійшли в харківську область");
+        assert!(r1.is_some());
+        let r2 = filter.process("Ch2", "шахеди над київським районом харкова");
+        assert!(r2.is_some()); // upgrade Oblast → District
+    }
+
+    #[test]
+    fn different_threat_kinds_not_deduped() {
+        let mut filter = kyiv_filter();
+        let r1 = filter.process("Ch1", "мопеды летят к киеву");
+        assert!(r1.is_some());
+        let r2 = filter.process("Ch1", "баллистика на киев!");
+        assert!(r2.is_some());
+    }
+
+    #[test]
+    fn repeated_bypasses_dedup() {
+        let mut filter = kyiv_filter();
+        let r1 = filter.process("Ch1", "баллистика на киев!");
+        assert!(r1.is_some());
+        // Normally same threat+city would be suppressed, but "повторно" bypasses dedup.
+        let r2 = filter.process("Ch1", "повторно баллистика на киев!");
+        assert!(r2.is_some());
+        assert!(r2.unwrap().contains("ПОВТОРНО"));
+    }
+
+    #[test]
+    fn repeated_missile_ru() {
+        let mut filter = kyiv_filter();
+        let r1 = filter.process("Ch1", "2 ракеты на киев");
+        assert!(r1.is_some());
+        let r2 = filter.process("Ch2", "повторно 2 ракеты на киев !");
+        assert!(r2.is_some());
+    }
+
+    #[test]
+    fn additionally_bypasses_dedup() {
+        let mut filter = kyiv_filter();
+        let r1 = filter.process("Ch1", "загроза балістики з брянська на київ");
+        assert!(r1.is_some());
+        let r2 = filter.process("Ch2", "додатково загроза балістики з таганрога на київ");
+        assert!(r2.is_some());
+    }
+
+    #[test]
+    fn all_clear_always_forwarded() {
+        let mut filter = kyiv_filter();
+        // No prior threat needed; all-clear is always forwarded.
+        let r = filter.process("Ch1", "відбій тривоги");
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("Відбій"));
+    }
+
+    #[test]
+    fn all_clear_clears_dedup_cache() {
+        let mut filter = kyiv_filter();
+        let r1 = filter.process("Ch1", "баллистика на киев!");
+        assert!(r1.is_some());
+        // All-clear should clear the cache
+        let r2 = filter.process("Ch1", "відбій тривоги");
+        assert!(r2.is_some());
+        // Same threat as before should now go through (cache cleared)
+        let r3 = filter.process("Ch1", "баллистика на киев!");
+        assert!(r3.is_some());
+    }
+
+    // ── Verify sample messages from messages_to_react.txt ──
+
+    #[test]
+    fn sample_mopeds_to_kyiv() {
+        let mut filter = kyiv_filter();
+        let r = filter.process("Ch", "12 мопедов летят к киеву");
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn sample_ballistic_vasylkiv() {
+        let mut filter = kyiv_filter();
+        let r = filter.process("Ch", "баллистика на киев/васильков !!! 2 ракеты");
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn sample_2_targets_on_kyiv() {
+        let mut filter = kyiv_filter();
+        let r = filter.process("Ch", "2 цілі на київ");
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn sample_repeated_ballistic_ua() {
+        let mut filter = kyiv_filter();
+        let _ = filter.process("Ch1", "балістика на київ");
+        // "Повторно" should bypass dedup
+        let r2 = filter.process("Ch2", "повторно балістика на київ!");
+        assert!(r2.is_some());
+    }
+
+    // ── Cross-channel urgent spam prevention ──
+
+    #[test]
+    fn full_scenario_6_steps() {
+        let mut filter = kyiv_filter();
+
+        // 1. Ch1: normal → forwarded (first alert)
+        let r1 = filter.process("Ch1", "баллистика на киев!");
+        assert!(r1.is_some());
+
+        // 2. Ch2: normal duplicate → suppressed (dedup)
+        let r2 = filter.process("Ch2", "баллистика на киев");
+        assert!(r2.is_none());
+
+        // 3. Ch3: "повторно" → forwarded (first re-alert)
+        let r3 = filter.process("Ch3", "повторно баллистика на киев!");
+        assert!(r3.is_some());
+        assert!(r3.unwrap().contains("ПОВТОРНО"));
+
+        // 4. Ch4: "повторно" from different channel → suppressed (echo)
+        let r4 = filter.process("Ch4", "повторно баллистика на киев!!!");
+        assert!(r4.is_none());
+
+        // 5. Ch5: normal → suppressed
+        let r5 = filter.process("Ch5", "баллистика на київ/васильков");
+        assert!(r5.is_none());
+
+        // 6. Ch3: same channel "повторно" again → forwarded (genuine new wave)
+        let r6 = filter.process("Ch3", "повторно баллистика на киев!");
+        assert!(r6.is_some());
+    }
+
+    #[test]
+    fn non_urgent_after_urgent_still_suppressed() {
+        let mut filter = kyiv_filter();
+        let r1 = filter.process("Ch1", "баллистика на киев!");
+        assert!(r1.is_some());
+        let r2 = filter.process("Ch2", "повторно баллистика на киев!");
+        assert!(r2.is_some());
+        // Non-urgent from a 3rd channel → suppressed
+        let r3 = filter.process("Ch3", "баллистика на киев!");
+        assert!(r3.is_none());
+    }
+
+    #[test]
+    fn urgent_proximity_upgrade_still_works() {
+        let mut filter = kharkiv_filter();
+        // City-level alert
+        let r1 = filter.process("Ch1", "шахеди увійшли в харківську область");
+        assert!(r1.is_some());
+        // Urgent + proximity upgrade → goes through
+        let r2 = filter.process("Ch2", "повторно шахеди над київським районом харкова");
+        assert!(r2.is_some());
+    }
+
+    // ── MRBM / Oreshnik / Kedr / БРСД ──
+
+    #[test]
+    fn detects_brsd_ua() {
+        let threats = detect_threats(
+            "загроза застосування балістики середньої дальності (брсд) по всій території україни",
+        );
+        assert!(threats.contains(&ThreatKind::Ballistic));
+    }
+
+    #[test]
+    fn detects_oreshnik_ua() {
+        let threats = detect_threats("імовірний пуск ракети кедр/орєшнік (п/п рс-26)");
+        assert!(threats.contains(&ThreatKind::Ballistic)); // кедр, рс-26
+        assert!(threats.contains(&ThreatKind::Hypersonic)); // орєшнік
+    }
+
+    #[test]
+    fn detects_oreshnik_ru() {
+        let threats = detect_threats("орешник по всей территории украины!");
+        assert!(threats.contains(&ThreatKind::Hypersonic));
+    }
+
+    #[test]
+    fn detects_kedr() {
+        let threats = detect_threats("запуск ракети кедр з астраханської області");
+        assert!(threats.contains(&ThreatKind::Ballistic));
+    }
+
+    #[test]
+    fn detects_rs26() {
+        let threats = detect_threats("рс-26 рубіж запущено");
+        assert!(threats.contains(&ThreatKind::Ballistic));
+    }
+
+    #[test]
+    fn detects_medium_range_ru() {
+        let threats = detect_threats("баллистическая ракета средней дальности");
+        assert!(threats.contains(&ThreatKind::Ballistic));
+    }
+
+    #[test]
+    fn detects_icbm_ua() {
+        let threats = detect_threats("загроза міжконтинентальної балістичної ракети");
+        assert!(threats.contains(&ThreatKind::Ballistic));
+    }
+
+    // ── Nationwide detection ──
+
+    #[test]
+    fn nationwide_ua() {
+        assert!(is_nationwide("загроза по всій території україни"));
+    }
+
+    #[test]
+    fn nationwide_ru() {
+        assert!(is_nationwide("угроза по всей территории украины"));
+    }
+
+    #[test]
+    fn not_nationwide_normal() {
+        assert!(!is_nationwide("баллистика на киев!"));
+    }
+
+    #[test]
+    fn not_nationwide_regional_territory() {
+        // "по всій території області" should NOT match —
+        // it's regional, not nationwide.
+        assert!(!is_nationwide("по всій території харківської області"));
+        assert!(!is_nationwide("по всей территории области"));
+    }
+
+    #[test]
+    fn nationwide_bypasses_location_filter() {
+        let mut filter = kharkiv_filter();
+        // This message has no Kharkiv-specific location keywords, but it
+        // says "по всій території" so it should still be forwarded.
+        let r = filter.process(
+            "Alerts",
+            "‼️увага! загроза застосування балістики середньої дальності (брсд) \
+             по всій території україни. імовірний пуск ракети кедр/орєшнік (п/п рс-26). \
+             перебувайте в безпечних місцях та не ігноруйте сигнали тривоги.",
+        );
+        assert!(r.is_some());
+        let text = r.unwrap();
+        assert!(text.contains("Балістика"));
+        assert!(text.contains("ВСЯ УКРАЇНА"));
+    }
+
+    #[test]
+    fn nationwide_shows_correct_tag() {
+        let mut filter = kyiv_filter();
+        let r = filter.process("Ch1", "загроза балістики по всій території україни");
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("🟣 ВСЯ УКРАЇНА"));
+    }
+
+    #[test]
+    fn nationwide_with_city_match_still_nationwide_tag() {
+        // Even if Kyiv is mentioned, "по всій території" means nationwide.
+        let mut filter = kyiv_filter();
+        let r = filter.process(
+            "Ch1",
+            "баллистика по всей территории украины, в том числе на киев",
+        );
+        assert!(r.is_some());
+        assert!(r.unwrap().contains("ВСЯ УКРАЇНА"));
+    }
+
+    // ── The exact sample message ──
+
+    #[test]
+    fn sample_oreshnik_brsd_nationwide() {
+        let mut filter = kyiv_filter();
+        let msg = "‼️Увага! Загроза застосування балістики середньої дальності (БРСД) \
+                   по всій території України.\n\
+                   \n\
+                   Імовірний пуск ракети Кедр/Орєшнік (п/п РС-26).\n\
+                   Перебувайте в безпечних місцях та не ігноруйте сигнали тривоги.";
+        let r = filter.process("ПС ЗСУ", msg);
+        assert!(r.is_some());
+        let text = r.unwrap();
+        // Must detect both Ballistic and Hypersonic
+        assert!(text.contains("Балістика"));
+        assert!(text.contains("Гіперзвук"));
+        // Must show nationwide tag
+        assert!(text.contains("ВСЯ УКРАЇНА"));
+    }
+
+    // ── Context window tests ──
+
+    #[test]
+    fn context_infers_ballistic_from_recent_message() {
+        let mut filter = kyiv_filter();
+        let channel_id = 123456;
+
+        // First message: mentions ballistic — seeds context window.
+        // (May not be forwarded if it doesn't match the user's location.)
+        let _r1 = filter.process_with_id(channel_id, "TestChannel", "балістична загроза з півдня");
+
+        // Second message: just "ціль" (target) - should infer Ballistic from context
+        let r2 = filter.process_with_id(channel_id, "TestChannel", "ціль на київ");
+        assert!(r2.is_some());
+        let text = r2.unwrap();
+        assert!(
+            text.contains("Балістика"),
+            "Should infer Ballistic from context"
+        );
+    }
+
+    #[test]
+    fn context_infers_cruise_missile_from_recent_message() {
+        let mut filter = kyiv_filter();
+        let channel_id = 789012;
+
+        // First message: cruise missile (forwarded at City proximity)
+        let r1 = filter.process_with_id(channel_id, "TestChannel", "крилата ракета калібр на київ");
+        assert!(r1.is_some());
+
+        // Second message: just "2 цілі" — should infer CruiseMissile.
+        // Use district-level location so proximity upgrades past r1's City
+        // and dedup lets it through.
+        let r2 =
+            filter.process_with_id(channel_id, "TestChannel", "2 цілі на шевченківський район");
+        assert!(r2.is_some());
+        let text = r2.unwrap();
+        assert!(
+            text.contains("Крилата ракета"),
+            "Should infer CruiseMissile from context"
+        );
+    }
+
+    #[test]
+    fn context_infers_shahed_from_dron_keyword() {
+        let mut filter = kyiv_filter();
+        let channel_id = 345678;
+
+        // First message: mentions drones — seeds context window.
+        // (May not be forwarded if it doesn't match the user's location.)
+        let _r1 = filter.process_with_id(channel_id, "TestChannel", "шахеди в повітрі");
+
+        // Second message: "цель" should infer Shahed
+        let r2 = filter.process_with_id(channel_id, "TestChannel", "ще цель на київ");
+        assert!(r2.is_some());
+        let text = r2.unwrap();
+        assert!(
+            text.contains("Шахед") || text.contains("дрон"),
+            "Should infer Shahed from context"
+        );
+    }
+
+    #[test]
+    fn context_separate_per_channel() {
+        let mut filter = kyiv_filter();
+        let channel1 = 111111;
+        let channel2 = 222222;
+
+        // Channel 1: ballistic
+        filter.process_with_id(channel1, "Channel1", "балістична ракета");
+
+        // Channel 2: cruise missile
+        filter.process_with_id(channel2, "Channel2", "крилата ракета");
+
+        // Channel 1: "ціль" should infer Ballistic
+        let r1 = filter.process_with_id(channel1, "Channel1", "ціль на київ");
+        if let Some(text) = r1 {
+            assert!(
+                text.contains("Балістика"),
+                "Channel 1 should infer Ballistic"
+            );
+        }
+
+        // Channel 2: "ціль" should infer CruiseMissile
+        let r2 = filter.process_with_id(channel2, "Channel2", "ціль на київ");
+        if let Some(text) = r2 {
+            assert!(
+                text.contains("Крилата ракета"),
+                "Channel 2 should infer CruiseMissile"
+            );
+        }
+    }
+
+    #[test]
+    fn context_defaults_to_missile_without_history() {
+        let mut filter = kyiv_filter();
+        let channel_id = 999999;
+
+        // No prior messages, just "ціль" - should default to generic Missile
+        let r = filter.process_with_id(channel_id, "TestChannel", "ціль на київ");
+        assert!(r.is_some());
+        let text = r.unwrap();
+        // Should have some threat indicator, defaulting to Missile
+        assert!(text.contains("Ракета"), "Should default to generic Missile");
+    }
+
+    #[test]
+    fn context_tsel_without_trigger_does_not_alert() {
+        let mut filter = kyiv_filter();
+
+        // "цель" alone in analytical text should not trigger without context
+        let threats = detect_threats("достичь цели операции");
+        assert!(threats.is_empty(), "Analytical 'цель' should not trigger");
+    }
+
+    // ── Location-aware context window tests ──
+
+    #[test]
+    fn context_location_only_infers_threat() {
+        // A message with just a location (no threat keyword) should infer
+        // the threat type from recent channel context.
+        let mut filter = kyiv_filter();
+        let ch = 400001;
+
+        // Seed: threat without location → not forwarded, but seeds context
+        let r1 = filter.process_with_id(ch, "Ch", "вихід балістики");
+        assert!(r1.is_none(), "No location → should NOT forward");
+
+        // Follow-up: just a location → infer Ballistic from context
+        let r2 = filter.process_with_id(ch, "Ch", "на київ");
+        assert!(
+            r2.is_some(),
+            "Should infer Ballistic from context + Київ location"
+        );
+        let text = r2.unwrap();
+        assert!(
+            text.contains("Балістика"),
+            "Should contain Ballistic threat: {text}"
+        );
+    }
+
+    #[test]
+    fn context_threat_infers_location() {
+        // When a channel already has a location in context, a new threat
+        // without location should infer the location.
+        let mut filter = kyiv_filter();
+        let ch = 400002;
+
+        // Seed: Ballistic with location → forwarded
+        let r1 = filter.process_with_id(ch, "Ch", "балістика на київ");
+        assert!(r1.is_some());
+
+        // New threat type, no location → should infer City from context
+        // (Different threat kind bypasses dedup)
+        let r2 = filter.process_with_id(ch, "Ch", "крилата ракета");
+        assert!(
+            r2.is_some(),
+            "Should infer location from context and forward"
+        );
+        let text = r2.unwrap();
+        assert!(
+            text.contains("Крилата ракета"),
+            "Should contain CruiseMissile: {text}"
+        );
+    }
+
+    #[test]
+    fn context_urgent_infers_both_threat_and_location() {
+        // "повторно" alone should infer both threat and location from context.
+        let mut filter = kyiv_filter();
+        let ch = 400003;
+
+        // Seed with threat + location
+        let r1 = filter.process_with_id(ch, "Ch", "балістика на київ");
+        assert!(r1.is_some());
+
+        // "повторно" with nothing else → infer Ballistic + City from context
+        let r2 = filter.process_with_id(ch, "Ch", "повторно");
+        assert!(
+            r2.is_some(),
+            "Should infer both threat+location from context"
+        );
+        let text = r2.unwrap();
+        assert!(text.contains("ПОВТОРНО"), "Should have urgency tag: {text}");
+        assert!(text.contains("Балістика"), "Should infer Ballistic: {text}");
+    }
+
+    #[test]
+    fn context_launch_trigger_infers_threat() {
+        // "виходи" (launches) should trigger inference like "ціль" does.
+        let mut filter = kyiv_filter();
+        filter.forward_all_threats = true; // bypass location for this check
+        let ch = 400004;
+
+        // Seed: ballistic
+        filter.process_with_id(ch, "Ch", "балістична загроза");
+
+        // "ще виходи" should infer Ballistic
+        let r = filter.process_with_id(ch, "Ch", "ще виходи на київ");
+        assert!(r.is_some(), "Launch trigger should infer from context");
+        let text = r.unwrap();
+        assert!(text.contains("Балістика"), "Should infer Ballistic: {text}");
+    }
+
+    #[test]
+    fn context_multichannel_scenario() {
+        // Full scenario from the user's description:
+        //   ch1: "вихід балістики"     → no location → not forwarded
+        //   ch2: "балістика брянськ"   → no location → not forwarded
+        //   ch1: "на київ"             → infer Ballistic → FORWARDED
+        //   ch2: "вектором на Київ"    → infer Ballistic → DEDUPED
+        //   ch1: "2 цілі на київ"      → infer Ballistic → DEDUPED
+        //   ch2: "повторно"            → urgent, infer both → FORWARDED
+        //   ch1: "повторні виходи"     → urgent echo → DEDUPED
+        let mut filter = kyiv_filter();
+        let ch1: i64 = 500001;
+        let ch2: i64 = 500002;
+
+        // 1. ch1: threat, no location → not forwarded
+        let r1 = filter.process_with_id(ch1, "Ch1", "вихід балістики");
+        assert!(r1.is_none(), "Step 1: no location → skip");
+
+        // 2. ch2: threat, launch location (брянськ) not in user config → not forwarded
+        let r2 = filter.process_with_id(ch2, "Ch2", "балістика брянськ");
+        assert!(
+            r2.is_none(),
+            "Step 2: брянськ is launch location, not user's → skip"
+        );
+
+        // 3. ch1: just location → infer Ballistic from ch1 context → FORWARD
+        let r3 = filter.process_with_id(ch1, "Ch1", "на київ");
+        assert!(r3.is_some(), "Step 3: infer Ballistic + Київ → forward");
+        let text3 = r3.unwrap();
+        assert!(
+            text3.contains("Балістика"),
+            "Step 3: should contain Ballistic: {text3}"
+        );
+
+        // 4. ch2: location → infer Ballistic from ch2 context → DEDUP
+        let r4 = filter.process_with_id(ch2, "Ch2", "вектором на Київ");
+        assert!(
+            r4.is_none(),
+            "Step 4: same threat+location from different channel → dedup"
+        );
+
+        // 5. ch1: "цілі" trigger + location → DEDUP
+        let r5 = filter.process_with_id(ch1, "Ch1", "2 цілі на київ");
+        assert!(r5.is_none(), "Step 5: same threat+location → dedup");
+
+        // 6. ch2: urgent, no keyword, no location → infer both from context → FORWARD
+        let r6 = filter.process_with_id(ch2, "Ch2", "повторно");
+        assert!(
+            r6.is_some(),
+            "Step 6: urgent infers Ballistic+Київ → forward"
+        );
+        let text6 = r6.unwrap();
+        assert!(text6.contains("ПОВТОРНО"), "Step 6: urgency tag: {text6}");
+        assert!(
+            text6.contains("Балістика"),
+            "Step 6: should contain Ballistic: {text6}"
+        );
+
+        // 7. ch1: urgent echo → DEDUP
+        let r7 = filter.process_with_id(ch1, "Ch1", "повторні виходи");
+        assert!(
+            r7.is_none(),
+            "Step 7: urgent echo from different channel → dedup"
+        );
+
+        // 8. ch2: same-channel re-alert → FORWARD (genuine new wave from same source)
+        let r8 = filter.process_with_id(ch2, "Ch2", "ще виходи");
+        assert!(r8.is_some(), "Step 8: same-channel re-alert → forward");
+        let text8 = r8.unwrap();
+        assert!(
+            text8.contains("Балістика"),
+            "Step 8: should contain Ballistic: {text8}"
+        );
+    }
+
+    #[test]
+    fn context_all_clear_resets_context() {
+        // After AllClear, stale threats should not be inferred.
+        let mut filter = kyiv_filter();
+        let ch = 400005;
+
+        // Seed: ballistic
+        filter.process_with_id(ch, "Ch", "балістика на київ");
+
+        // AllClear → clears both dedup cache and context
+        let r_clear = filter.process_with_id(ch, "Ch", "відбій тривоги");
+        assert!(r_clear.is_some());
+        assert!(r_clear.unwrap().contains("Відбій"));
+
+        // Now "на київ" alone should NOT forward (no threat in context)
+        let r_after = filter.process_with_id(ch, "Ch", "на київ");
+        assert!(
+            r_after.is_none(),
+            "After AllClear, should not infer stale threats"
+        );
+    }
+
+    #[test]
+    fn context_urgency_povtorni() {
+        // "повторні" (adjective plural) should also trigger urgency
+        // via the "повторн" stem.
+        assert!(is_urgent("повторні виходи"));
+    }
+
+    #[test]
+    fn context_urgency_shche_vykho() {
+        // "ще виходи" (more launches) should trigger urgency.
+        assert!(is_urgent("ще виходи на київ"));
+    }
+}

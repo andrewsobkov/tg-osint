@@ -38,6 +38,7 @@ A Telegram OSINT tool written in Rust that monitors Ukrainian air-raid / militar
    MY_CITY=Київ,Києв,Киев,Kyiv,Васильків,Васильков
    MY_DISTRICT=Шевченківськ,Шевченковск
    DEDUP_WINDOW_SECS=180                      # optional, default 180
+   CONTEXT_WINDOW_SECS=300                    # optional, default 300 (5 min)
    FORWARD_ALL_THREATS=false                   # optional, forward threats outside your area
    ```
 
@@ -64,6 +65,7 @@ A Telegram OSINT tool written in Rust that monitors Ukrainian air-raid / militar
 | `TG_SESSION_PATH` | ❌ | Path for the SQLite session file (default: `./telegram.session.sqlite`) |
 | `BOT_DB_PATH` | ❌ | Path for the subscriber SQLite file (default: `./bot_subscribers.sqlite`) |
 | `DEDUP_WINDOW_SECS` | ❌ | Dedup sliding window in seconds (default: `180`) |
+| `CONTEXT_WINDOW_SECS` | ❌ | Per-channel context window for threat inference in seconds (default: `300`) |
 | `FORWARD_ALL_THREATS` | ❌ | `true` to forward alerts even outside your area (default: `false`) |
 | `LLM_ENABLED` | ❌ | `true` to enable LLM secondary filter (default: `false`) |
 | `LLM_MODEL` | ❌ | Ollama model name (default: `qwen2.5:7b`) |
