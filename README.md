@@ -49,6 +49,41 @@ A Telegram OSINT tool written in Rust that monitors Ukrainian air-raid / militar
 
    On first run you will be prompted to enter the login code sent to your Telegram account.
 
+## Run Modes
+
+`RUN_MODE` controls execution mode:
+
+- `live` (default): current behavior, listen to Telegram updates and broadcast alerts.
+- `dump_today`: fetch today history from `TG_CHANNELS` and write it to JSONL.
+- `replay`: read JSONL dump and replay messages through the same filter pipeline without Telegram user connection.
+
+### 1) Dump today's history
+
+```bash
+RUN_MODE=dump_today \
+DUMP_OUTPUT_PATH=./dumps/2026-02-22.jsonl \
+DUMP_TZ_OFFSET_MINUTES=120 \
+cargo run
+```
+
+`DUMP_TZ_OFFSET_MINUTES` defines what "today" means (for Ukraine use `120` in winter, `180` in summer).
+
+### 2) Replay offline
+
+```bash
+RUN_MODE=replay \
+REPLAY_INPUT_PATH=./dumps/2026-02-22.jsonl \
+REPLAY_SPEED=10 \
+cargo run
+```
+
+Replay timing options:
+
+- `REPLAY_SPEED` (default `1.0`): `10` means 10x faster than original timing.
+- `REPLAY_STEP_MS`: fixed delay between all events (overrides timestamp-based replay).
+- `REPLAY_MIN_DELAY_MS` (default `0`) and `REPLAY_MAX_DELAY_MS` (default `10000`): clamp replay delays.
+- `REPLAY_BROADCAST` (default `false`): if `true`, replayed alerts are sent via bot subscribers; otherwise printed to stdout.
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -71,6 +106,15 @@ A Telegram OSINT tool written in Rust that monitors Ukrainian air-raid / militar
 | `LLM_MODEL` | ❌ | Ollama model name (default: `qwen2.5:7b`) |
 | `LLM_ENDPOINT` | ❌ | Ollama / llama-server base URL (default: `http://127.0.0.1:11434`) |
 | `LLM_TIMEOUT_MS` | ❌ | LLM request timeout in milliseconds (default: `3000`) |
+| `RUN_MODE` | ❌ | `live` (default), `dump_today`, or `replay` |
+| `DUMP_OUTPUT_PATH` | ❌ | Output JSONL file for `RUN_MODE=dump_today` (default: `./dump_today.jsonl`) |
+| `DUMP_TZ_OFFSET_MINUTES` | ❌ | Timezone offset for defining "today" in dump mode (default: `0`) |
+| `REPLAY_INPUT_PATH` | ✅ for replay | JSONL file path used by `RUN_MODE=replay` |
+| `REPLAY_SPEED` | ❌ | Replay speed multiplier (default: `1.0`) |
+| `REPLAY_STEP_MS` | ❌ | Fixed replay delay per event in ms (overrides speed) |
+| `REPLAY_MIN_DELAY_MS` | ❌ | Minimum delay in ms for timestamp replay (default: `0`) |
+| `REPLAY_MAX_DELAY_MS` | ❌ | Maximum delay in ms for timestamp replay (default: `10000`) |
+| `REPLAY_BROADCAST` | ❌ | `true` to send replay alerts via bot, otherwise stdout (default: `false`) |
 
 > **Tip:** Use short stems to catch all Ukrainian/Russian declension forms.
 > For example, `Київ` matches "Київ", "Києву"; `Киев` matches "Киев", "Киеву", "Киева".
@@ -203,4 +247,3 @@ LLM_MODEL=qwen2.5
 - Regex keyword support
 - Per-channel keyword rules
 - Web dashboard
-
