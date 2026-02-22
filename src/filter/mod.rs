@@ -21,11 +21,8 @@ fn is_nationwide(lower: &str) -> bool {
     NATIONWIDE_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
-/// Returns `true` for long recap/statistics posts that list launch totals,
-/// interceptions and results, but are not immediate trajectory alerts.
-fn is_informational_report(lower: &str) -> bool {
-    // Keep clearly live movement/trajectory alerts.
-    let live_movement_markers = [
+fn has_live_movement_markers(lower: &str) -> bool {
+    let markers = [
         "курсом на",
         "у бік",
         "в бік",
@@ -38,8 +35,63 @@ fn is_informational_report(lower: &str) -> bool {
         "скоростная цель",
         "ціль на",
         "цель на",
+        "заліта",
+        "напрямку",
     ];
-    if live_movement_markers.iter().any(|m| lower.contains(m)) {
+    markers.iter().any(|m| lower.contains(m))
+}
+
+/// Broad stems for non-local Ukrainian regions/cities that often appear in
+/// trajectory messages. Used to prevent local-context fallback from
+/// re-labeling clearly non-local alerts as local.
+const NONLOCAL_REGION_STEMS: &[&str] = &[
+    "харків",
+    "харьков",
+    "одес",
+    "никола",
+    "микола",
+    "херсон",
+    "запор",
+    "дніпр",
+    "днепр",
+    "черніг",
+    "черниг",
+    "черкас",
+    "сум",
+    "полтав",
+    "кропив",
+    "кіровоград",
+    "кировоград",
+    "вінниц",
+    "винниц",
+    "житомир",
+    "львів",
+    "львов",
+    "терноп",
+    "рівн",
+    "ровен",
+    "хмельниц",
+    "чернів",
+    "чернов",
+    "луцьк",
+    "волин",
+    "ужгород",
+    "закарпат",
+    "івано",
+    "ивано",
+    "донеч",
+    "донец",
+    "луган",
+    "крим",
+    "крыма",
+    "криму",
+];
+
+/// Returns `true` for long recap/statistics posts that list launch totals,
+/// interceptions and results, but are not immediate trajectory alerts.
+fn is_informational_report(lower: &str) -> bool {
+    // Keep clearly live movement/trajectory alerts.
+    if has_live_movement_markers(lower) {
         return false;
     }
 
@@ -92,6 +144,15 @@ fn is_negative_update(lower: &str) -> bool {
         return false;
     }
 
+    // "поки чисто / не фіксуються, можливі повторні пуски" is still
+    // a status update, not a fresh active launch message.
+    if lower.contains("повторн")
+        && (lower.contains("можлив") || lower.contains("ймовір"))
+        && lower.contains("пуск")
+    {
+        return true;
+    }
+
     // Keep clearly active updates.
     let active_markers = [
         "курсом на",
@@ -107,7 +168,6 @@ fn is_negative_update(lower: &str) -> bool {
         "загроз",
         "увага",
         "ще ",
-        "повторн",
     ];
     !active_markers.iter().any(|m| lower.contains(m))
 }
@@ -284,19 +344,63 @@ impl LocationConfig {
         }
     }
 
+    fn contains_with_boundary(lower: &str, kw: &str) -> bool {
+        if kw.is_empty() {
+            return false;
+        }
+        let mut start = 0;
+        while let Some(rel) = lower[start..].find(kw) {
+            let s = start + rel;
+            let e = s + kw.len();
+            let prev_ok = lower[..s]
+                .chars()
+                .next_back()
+                .map(|c| !c.is_alphabetic())
+                .unwrap_or(true);
+            let next_ok = lower[e..]
+                .chars()
+                .next()
+                .map(|c| !c.is_alphabetic())
+                .unwrap_or(true);
+            if prev_ok && next_ok {
+                return true;
+            }
+            start = e;
+        }
+        false
+    }
+
     /// Return the highest proximity level that matches `lower` (already
     /// lowercased text).
     fn check(&self, lower: &str) -> Proximity {
-        if self.district.iter().any(|kw| lower.contains(kw.as_str())) {
+        let (district, city, oblast) = self.match_levels(lower);
+        if district {
             return Proximity::District;
         }
-        if self.city.iter().any(|kw| lower.contains(kw.as_str())) {
+        if city {
             return Proximity::City;
         }
-        if self.oblast.iter().any(|kw| lower.contains(kw.as_str())) {
+        if oblast {
             return Proximity::Oblast;
         }
         Proximity::None
+    }
+
+    /// Return booleans for district/city/oblast matches.
+    fn match_levels(&self, lower: &str) -> (bool, bool, bool) {
+        fn matches_loc_kw(lower: &str, kw: &str) -> bool {
+            if kw.contains(char::is_whitespace) {
+                // Phrases like "на київ" should not match "на київщину".
+                LocationConfig::contains_with_boundary(lower, kw)
+            } else {
+                // Stems like "київщин", "харківськ" must match declensions.
+                lower.contains(kw)
+            }
+        }
+        let district = self.district.iter().any(|kw| matches_loc_kw(lower, kw));
+        let city = self.city.iter().any(|kw| matches_loc_kw(lower, kw));
+        let oblast = self.oblast.iter().any(|kw| matches_loc_kw(lower, kw));
+        (district, city, oblast)
     }
 }
 
@@ -534,6 +638,12 @@ struct ContextDetection {
     nationwide: bool,
 }
 
+#[derive(Default)]
+struct NegativeStatusState {
+    latched_for_wave: bool,
+    last_sent_at: Option<Instant>,
+}
+
 /// Stateful filter: detects threats, checks location, deduplicates.
 pub struct AlertFilter {
     location: LocationConfig,
@@ -549,6 +659,11 @@ pub struct AlertFilter {
     /// When `true`, messages that contain threat keywords but do NOT match
     /// any user location are still forwarded (with `Proximity::None`).
     forward_all_threats: bool,
+    /// Per-channel state for one-time negative-status updates
+    /// ("не фіксуються", "більше не спостерігається", ...).
+    negative_status_state: HashMap<i64, NegativeStatusState>,
+    /// Minimum delay between forwarded negative-status updates per channel.
+    negative_status_cooldown: Duration,
 }
 
 impl AlertFilter {
@@ -562,6 +677,7 @@ impl AlertFilter {
     /// | `DEDUP_WINDOW_SECS`    | `180`   | Sliding dedup window in seconds         |
     /// | `CONTEXT_WINDOW_SECS`  | `300`   | Channel context window in seconds       |
     /// | `URGENT_COOLDOWN_SECS` | `20`    | Same-channel urgent re-alert cooldown   |
+    /// | `NEGATIVE_STATUS_COOLDOWN_SECS` | `120` | Per-channel negative update cooldown |
     /// | `FORWARD_ALL_THREATS`  | `false` | Forward threats outside your area too   |
     pub fn from_env() -> Self {
         let location = LocationConfig::from_env();
@@ -577,6 +693,10 @@ impl AlertFilter {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(20);
+        let negative_status_cooldown_secs: u64 = std::env::var("NEGATIVE_STATUS_COOLDOWN_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120);
         let forward_all: bool = std::env::var("FORWARD_ALL_THREATS")
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -590,6 +710,8 @@ impl AlertFilter {
             context_window: Duration::from_secs(context_secs),
             urgent_same_channel_cooldown: Duration::from_secs(urgent_cooldown_secs),
             forward_all_threats: forward_all,
+            negative_status_state: HashMap::new(),
+            negative_status_cooldown: Duration::from_secs(negative_status_cooldown_secs),
         }
     }
 
@@ -604,6 +726,9 @@ impl AlertFilter {
             ctx.evict();
             !ctx.messages.is_empty()
         });
+        // Keep negative-status map bounded to channels still present in context.
+        self.negative_status_state
+            .retain(|channel_id, _| self.channel_contexts.contains_key(channel_id));
     }
 
     /// Back-compat wrapper used by tests. Prefer [`process_with_id`] when
@@ -634,11 +759,11 @@ impl AlertFilter {
             return None;
         }
         if is_negative_update(&lower) {
-            debug!("Negative-status update (clear/no longer observed) – skipping");
-            return None;
+            return self.handle_negative_status_update(channel_id, channel_title, text, &lower);
         }
 
         let det = self.detect_with_context(channel_id, &lower, channel_title)?;
+        self.on_active_threat_seen(channel_id, &det.threats);
 
         // AllClear fast-path.
         if let Some(alert) = self.try_all_clear(&det.threats, channel_title, text) {
@@ -677,8 +802,7 @@ impl AlertFilter {
             return None;
         }
         if is_negative_update(&lower) {
-            debug!("Negative-status update (clear/no longer observed) – skipping");
-            return None;
+            return self.handle_negative_status_update(channel_id, channel_title, text, &lower);
         }
 
         let det = self.detect_with_context(channel_id, &lower, channel_title)?;
@@ -712,6 +836,7 @@ impl AlertFilter {
         } else {
             det.threats
         };
+        self.on_active_threat_seen(channel_id, &threats);
 
         self.dedup_and_format(
             channel_id,
@@ -739,6 +864,7 @@ impl AlertFilter {
         // Phase 1 — raw keyword detection (borrows &self only)
         let mut threats = detect_threats(lower);
         let (mut proximity, nationwide) = self.resolve_location(lower, channel_title);
+        let explicit_nonlocal = self.has_explicit_nonlocal_location(lower);
         let urgent = is_urgent(lower);
 
         // Phase 2 — context inference (borrows &mut self via get_context)
@@ -763,8 +889,13 @@ impl AlertFilter {
             }
 
             // 2c. Have threat or urgency, but no location → infer location once from context.
-            if proximity == Proximity::None && !nationwide && (!threats.is_empty() || urgent) {
+            if proximity == Proximity::None
+                && !nationwide
+                && !explicit_nonlocal
+                && (!threats.is_empty() || urgent)
+            {
                 let ctx_prox = context.infer_location();
+                let ctx_prox = Self::cap_context_proximity(ctx_prox);
                 if ctx_prox != Proximity::None {
                     debug!("Inferred location {ctx_prox:?} from context");
                     proximity = ctx_prox;
@@ -783,6 +914,19 @@ impl AlertFilter {
         if threats.len() == 1 && threats[0] == ThreatKind::Missile {
             if let Some(inferred) = self.infer_recent_global_specific_threat() {
                 debug!("Refined generic Missile -> {inferred:?} from global context");
+                threats[0] = inferred;
+            }
+        }
+        // Phase 4 — refine generic Other during clearly live movement.
+        // Example: "Залітає ... Українка ..." inside an active missile wave
+        // should inherit the recent missile-family context.
+        if threats.len() == 1
+            && threats[0] == ThreatKind::Other
+            && has_live_movement_markers(lower)
+            && (proximity != Proximity::None || nationwide || urgent)
+        {
+            if let Some(inferred) = self.infer_recent_global_specific_threat() {
+                debug!("Refined Other -> {inferred:?} from global context");
                 threats[0] = inferred;
             }
         }
@@ -808,7 +952,8 @@ impl AlertFilter {
     }
 
     /// Infer the most recent specific threat across all channel windows.
-    /// Excludes generic Missile/Other/AllClear to avoid noisy promotion.
+    /// Uses only missile-family specific classes to avoid cross-wave bleed
+    /// (e.g. generic "ракети" accidentally inheriting Shahed).
     fn infer_recent_global_specific_threat(&mut self) -> Option<ThreatKind> {
         let mut best: Option<(Instant, ThreatKind)> = None;
 
@@ -816,9 +961,12 @@ impl AlertFilter {
             ctx.evict();
             for msg in ctx.messages.iter().rev() {
                 if let Some(&threat) = msg.detected_threats.iter().find(|t| {
-                    !matches!(
+                    matches!(
                         t,
-                        ThreatKind::Other | ThreatKind::AllClear | ThreatKind::Missile
+                        ThreatKind::Ballistic
+                            | ThreatKind::Hypersonic
+                            | ThreatKind::CruiseMissile
+                            | ThreatKind::GuidedBomb
                     )
                 }) {
                     match best {
@@ -830,6 +978,74 @@ impl AlertFilter {
         }
 
         best.map(|(_, t)| t)
+    }
+
+    fn on_active_threat_seen(&mut self, channel_id: i64, threats: &[ThreatKind]) {
+        if threats
+            .iter()
+            .any(|t| !matches!(t, ThreatKind::AllClear | ThreatKind::Other))
+        {
+            let entry = self.negative_status_state.entry(channel_id).or_default();
+            if entry.latched_for_wave {
+                debug!("Negative-status latch reset for channel {channel_id}");
+            }
+            entry.latched_for_wave = false;
+        }
+    }
+
+    fn handle_negative_status_update(
+        &mut self,
+        channel_id: i64,
+        channel_title: &str,
+        text: &str,
+        lower: &str,
+    ) -> Option<String> {
+        self.evict();
+        let now = Instant::now();
+
+        let has_recent_threat = if let Some(ctx) = self.channel_contexts.get_mut(&channel_id) {
+            ctx.infer_recent_threat().is_some()
+        } else {
+            false
+        };
+        if !has_recent_threat {
+            debug!("Negative-status update without active threat context – skipping");
+            return None;
+        }
+
+        {
+            let state = self.negative_status_state.entry(channel_id).or_default();
+            if state.latched_for_wave {
+                debug!("Negative-status already sent for current wave (channel {channel_id})");
+                return None;
+            }
+            if let Some(ts) = state.last_sent_at {
+                if now.duration_since(ts) < self.negative_status_cooldown {
+                    debug!(
+                        "Negative-status throttled (channel {channel_id}, cooldown={}s)",
+                        self.negative_status_cooldown.as_secs()
+                    );
+                    return None;
+                }
+            }
+        }
+
+        let (mut proximity, nationwide) = self.resolve_location(lower, channel_title);
+        let explicit_nonlocal = self.has_explicit_nonlocal_location(lower);
+        if proximity == Proximity::None && !nationwide && !explicit_nonlocal {
+            if let Some(ctx) = self.channel_contexts.get_mut(&channel_id) {
+                let ctx_prox = ctx.infer_location();
+                let ctx_prox = Self::cap_context_proximity(ctx_prox);
+                if ctx_prox != Proximity::None {
+                    proximity = ctx_prox;
+                }
+            }
+        }
+
+        let state = self.negative_status_state.entry(channel_id).or_default();
+        state.latched_for_wave = true;
+        state.last_sent_at = Some(now);
+        Some(self.format_negative_status(proximity, nationwide, channel_title, text))
     }
 
     /// If the threats are a sole AllClear, format and clear cache.
@@ -845,6 +1061,7 @@ impl AlertFilter {
             self.cache.clear();
             // Clear channel contexts to prevent stale inference into the next wave.
             self.channel_contexts.clear();
+            self.negative_status_state.clear();
             return Some(alert);
         }
         None
@@ -853,19 +1070,59 @@ impl AlertFilter {
     /// Determine proximity and nationwide status from lowercased text.
     fn resolve_location(&self, lower: &str, channel_title: &str) -> (Proximity, bool) {
         let lower_title = channel_title.to_lowercase();
-        let combined = format!("{lower_title} {lower}");
         let nationwide = is_nationwide(lower);
-        let proximity = if nationwide {
-            let loc = self.location.check(&combined);
-            if loc == Proximity::None {
-                Proximity::Oblast
-            } else {
-                loc
-            }
+        let explicit_nonlocal = self.has_explicit_nonlocal_location(lower);
+        let (district_m, city_m, oblast_m) = self.location.match_levels(lower);
+
+        // "на Київ та область" should be treated as oblast scope (broader risk).
+        let text_proximity = if district_m {
+            Proximity::District
+        } else if city_m && (oblast_m || lower.contains("област")) {
+            Proximity::Oblast
+        } else if city_m {
+            Proximity::City
+        } else if oblast_m {
+            Proximity::Oblast
         } else {
-            self.location.check(&combined)
+            Proximity::None
+        };
+        let proximity = if nationwide {
+            if text_proximity != Proximity::None {
+                text_proximity
+            } else if !explicit_nonlocal {
+                let title_loc = self.location.check(&lower_title);
+                if title_loc == Proximity::None {
+                    Proximity::Oblast
+                } else {
+                    title_loc
+                }
+            } else {
+                Proximity::Oblast
+            }
+        } else if text_proximity != Proximity::None {
+            text_proximity
+        } else if !explicit_nonlocal {
+            self.location.check(&lower_title)
+        } else {
+            Proximity::None
         };
         (proximity, nationwide)
+    }
+
+    fn cap_context_proximity(p: Proximity) -> Proximity {
+        match p {
+            Proximity::District => Proximity::City,
+            other => other,
+        }
+    }
+
+    fn has_explicit_nonlocal_location(&self, lower: &str) -> bool {
+        if self.location.check(lower) != Proximity::None {
+            return false;
+        }
+        NONLOCAL_REGION_STEMS
+            .iter()
+            .any(|stem| lower.contains(stem))
     }
 
     /// Check urgency, run dedup, update cache, and format.
@@ -1000,18 +1257,43 @@ impl AlertFilter {
         out.push_str(&format!("— 📡 {channel_title}"));
         out
     }
+
+    fn format_negative_status(
+        &self,
+        proximity: Proximity,
+        nationwide: bool,
+        channel_title: &str,
+        text: &str,
+    ) -> String {
+        let prox_tag = if nationwide {
+            "🟣 ВСЯ УКРАЇНА"
+        } else {
+            proximity.tag()
+        };
+        let mut out = String::new();
+        if prox_tag.is_empty() {
+            out.push_str("ℹ️ Статус\n");
+        } else {
+            out.push_str(&format!("ℹ️ Статус · {prox_tag}\n"));
+        }
+        out.push_str("———\n");
+        out.push_str(text);
+        out.push_str(&format!("\n— 📡 {channel_title}"));
+        out
+    }
 }
 
 impl fmt::Display for AlertFilter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "AlertFilter(oblast={:?}, city={:?}, district={:?}, dedup={}s, urgent_cd={}s, fwd_all={})",
+            "AlertFilter(oblast={:?}, city={:?}, district={:?}, dedup={}s, urgent_cd={}s, neg_status_cd={}s, fwd_all={})",
             self.location.oblast,
             self.location.city,
             self.location.district,
             self.dedup_window.as_secs(),
             self.urgent_same_channel_cooldown.as_secs(),
+            self.negative_status_cooldown.as_secs(),
             self.forward_all_threats,
         )
     }
@@ -1038,6 +1320,8 @@ pub fn kyiv_filter() -> AlertFilter {
         context_window: Duration::from_secs(300),
         urgent_same_channel_cooldown: Duration::from_secs(0),
         forward_all_threats: false,
+        negative_status_state: HashMap::new(),
+        negative_status_cooldown: Duration::from_secs(120),
     }
 }
 
@@ -1055,5 +1339,7 @@ pub fn kharkiv_filter() -> AlertFilter {
         context_window: Duration::from_secs(300),
         urgent_same_channel_cooldown: Duration::from_secs(0),
         forward_all_threats: false,
+        negative_status_state: HashMap::new(),
+        negative_status_cooldown: Duration::from_secs(120),
     }
 }

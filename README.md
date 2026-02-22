@@ -40,6 +40,7 @@ A Telegram OSINT tool written in Rust that monitors Ukrainian air-raid / militar
    DEDUP_WINDOW_SECS=180                      # optional, default 180
    CONTEXT_WINDOW_SECS=300                    # optional, default 300 (5 min)
    URGENT_COOLDOWN_SECS=20                    # optional, same-channel urgent re-alert cooldown
+   NEGATIVE_STATUS_COOLDOWN_SECS=120          # optional, one-time "не фіксуються" status cooldown
    FORWARD_ALL_THREATS=false                  # optional, forward threats outside your area
    ```
 
@@ -116,6 +117,7 @@ Replay timing options:
 | `DEDUP_WINDOW_SECS` | ❌ | Dedup sliding window in seconds (default: `180`) |
 | `CONTEXT_WINDOW_SECS` | ❌ | Per-channel context window for threat inference in seconds (default: `300`) |
 | `URGENT_COOLDOWN_SECS` | ❌ | Minimum delay for same-channel urgent re-alerts (default: `20`) |
+| `NEGATIVE_STATUS_COOLDOWN_SECS` | ❌ | Per-channel cooldown for one-time negative status updates (default: `120`) |
 | `FORWARD_ALL_THREATS` | ❌ | `true` to forward alerts even outside your area (default: `false`) |
 | `LLM_ENABLED` | ❌ | `true` to enable LLM secondary filter (default: `false`) |
 | `LLM_MODEL` | ❌ | Ollama model name (default: `qwen2.5:7b`) |

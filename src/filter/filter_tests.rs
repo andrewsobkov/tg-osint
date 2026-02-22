@@ -422,29 +422,56 @@ mod tests {
     }
 
     #[test]
-    fn process_skips_negative_status_updates() {
+    fn process_negative_status_updates_once_per_wave() {
         let mut filter = kyiv_filter();
         filter.forward_all_threats = true;
+        filter.negative_status_cooldown = Duration::from_secs(0);
 
         // Seed active context first.
         let _ = filter.process("monitor", "КР Циркон на Київ");
 
         let r1 = filter.process("monitor", "Більше не спостерігається, пролунав вибух.");
         assert!(
-            r1.is_none(),
-            "negative-status phrasing should be suppressed"
+            r1.is_some(),
+            "first negative-status phrasing in active wave should be forwarded once"
         );
+        assert!(r1.unwrap().contains("ℹ️ Статус"));
 
         let r2 = filter.process("monitor", "Не фіксуються.");
         assert!(
             r2.is_none(),
-            "negative-status phrasing should be suppressed"
+            "subsequent negative-status updates should be suppressed in same wave"
         );
 
+        // A visible threat again should unlock one more status update.
+        let _ = filter.process("monitor", "Ще ракети з Криму!");
         let r3 = filter.process("monitor", "Все");
         assert!(
-            r3.is_none(),
-            "short 'Все' status update should be suppressed"
+            r3.is_some(),
+            "after threat becomes visible again, status update should pass once"
+        );
+    }
+
+    #[test]
+    fn negative_status_with_possible_repeat_launch_is_status() {
+        let mut filter = kyiv_filter();
+        filter.forward_all_threats = true;
+        filter.negative_status_cooldown = Duration::from_secs(0);
+
+        let _ = filter.process("monitor", "Балістика на Київ");
+        let r = filter.process(
+            "monitor",
+            "По балістиці поки чисто. Можливі повторні пуски.",
+        );
+        assert!(
+            r.is_some(),
+            "status update should be forwarded once per wave"
+        );
+        let text = r.unwrap();
+        assert!(text.contains("ℹ️ Статус"));
+        assert!(
+            !text.contains("‼️🚀 Балістика"),
+            "status phrasing must not be forwarded as active ballistic threat"
         );
     }
 
@@ -586,6 +613,29 @@ mod tests {
             district: vec![],
         };
         let p = loc.check("загроза для харківської області");
+        assert_eq!(p, Proximity::Oblast);
+    }
+
+    #[test]
+    fn proximity_city_phrase_does_not_capture_kyivshchyna() {
+        let loc = LocationConfig {
+            oblast: vec!["київщин".into()],
+            city: vec!["на київ".into()],
+            district: vec![],
+        };
+        let p = loc.check("2 циркони, курсом на київщину");
+        assert_eq!(
+            p,
+            Proximity::Oblast,
+            "city phrase must not match inside 'київщину'"
+        );
+    }
+
+    #[test]
+    fn resolve_location_city_and_oblast_phrase_prefers_oblast() {
+        let filter = kyiv_filter();
+        let (p, nationwide) = filter.resolve_location("ракети на київ та область", "any");
+        assert!(!nationwide);
         assert_eq!(p, Proximity::Oblast);
     }
 
@@ -784,6 +834,50 @@ mod tests {
         assert!(
             !text.contains("Ракета"),
             "Should avoid generic Missile label in this context: {text}"
+        );
+    }
+
+    #[test]
+    fn global_context_does_not_refine_generic_missile_to_shahed() {
+        let mut filter = kyiv_filter();
+        let ch_shahed: i64 = 910001;
+        let ch_generic: i64 = 910002;
+
+        let _ = filter.process_with_id(ch_shahed, "Seed", "шахеди біля узина");
+        let r = filter.process_with_id(ch_generic, "Radar", "4 ракети на київ!");
+        assert!(r.is_some());
+        let text = r.unwrap();
+        assert!(
+            !text.contains("Шахед"),
+            "generic missile/trajectory message must not be promoted to Shahed: {text}"
+        );
+    }
+
+    #[test]
+    fn live_movement_other_does_not_refine_when_explicit_nonlocal() {
+        let mut filter = kyiv_filter();
+        let ch_hyp: i64 = 920001;
+        let ch_other: i64 = 920002;
+
+        // Seed global threat context without creating a forwarded/deduped alert.
+        let _ = filter.process_with_id(ch_hyp, "Seed", "циркон");
+        // Seed location context for the Aeris channel (mirrors replay behavior).
+        let _ = filter.process_with_id(ch_other, "Aeris Rimor", "на київ");
+        filter.forward_all_threats = true;
+        let r = filter.process_with_id(
+            ch_other,
+            "Aeris Rimor",
+            "Залітає на Кіровоградщину.\n\nУкраїнка навколо укриття.",
+        );
+        assert!(r.is_some());
+        let text = r.unwrap();
+        assert!(
+            text.contains("⚠️ Загроза"),
+            "explicit non-local message should stay generic and not inherit local missile context: {text}"
+        );
+        assert!(
+            !text.contains("Гіперзвук"),
+            "non-local live message should not be promoted to local hypersonic alert: {text}"
         );
     }
 
@@ -1061,6 +1155,44 @@ mod tests {
         assert!(
             text.contains("Балістика"),
             "Should infer Ballistic from context"
+        );
+    }
+
+    #[test]
+    fn context_fallback_does_not_relabel_explicit_nonlocal_message() {
+        let mut filter = kyiv_filter();
+        let channel_id = 700001;
+
+        let _ = filter.process_with_id(channel_id, "Kyiv AirDefense 🌇", "Балістика на Київ");
+
+        let r = filter.process_with_id(
+            channel_id,
+            "Kyiv AirDefense 🌇",
+            "🛵 Група БпЛА на Харків з півдня.",
+        );
+        assert!(
+            r.is_none(),
+            "explicit non-local (Kharkiv) text must not inherit local Kyiv proximity from context/title"
+        );
+    }
+
+    #[test]
+    fn context_district_fallback_is_capped_to_city() {
+        let mut filter = kyiv_filter();
+        let channel_id = 700002;
+        filter.forward_all_threats = true;
+
+        let _ = filter.process_with_id(
+            channel_id,
+            "Kyiv AirDefense 🌇",
+            "‼️ Загроза балістики у Голосіївському районі",
+        );
+        let r = filter.process_with_id(channel_id, "Kyiv AirDefense 🌇", "ПОВТОРНО РАКЕТИ!");
+        assert!(r.is_some());
+        let text = r.unwrap();
+        assert!(
+            !text.contains("🔴 РАЙОН"),
+            "fallback proximity should not keep district stickiness: {text}"
         );
     }
 
