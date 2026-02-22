@@ -21,15 +21,182 @@ fn is_nationwide(lower: &str) -> bool {
     NATIONWIDE_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
+/// Returns `true` for long recap/statistics posts that list launch totals,
+/// interceptions and results, but are not immediate trajectory alerts.
+fn is_informational_report(lower: &str) -> bool {
+    // Keep clearly live movement/trajectory alerts.
+    let live_movement_markers = [
+        "курсом на",
+        "у бік",
+        "в бік",
+        "вектором на",
+        "летить",
+        "летят",
+        "руха",
+        "рух бпла",
+        "швидкісна ціль",
+        "скоростная цель",
+        "ціль на",
+        "цель на",
+    ];
+    if live_movement_markers.iter().any(|m| lower.contains(m)) {
+        return false;
+    }
+
+    let report_markers = [
+        "збито/подавлено",
+        "станом на",
+        "у ніч на",
+        "усього",
+        "за попередніми даними",
+        "зафіксовано",
+        "влучання",
+        "падіння збитих",
+        "інформація щодо",
+        "разом – до перемоги",
+        "тримаймо небо",
+    ];
+    let marker_hits = report_markers
+        .iter()
+        .filter(|m| lower.contains(**m))
+        .count();
+    let line_breaks = lower.matches('\n').count();
+    let bullet_lines = lower.matches("\n- ").count() + lower.matches("\n•").count();
+    let digit_count = lower.chars().filter(|c| c.is_ascii_digit()).count();
+
+    marker_hits >= 2 && (line_breaks >= 10 || bullet_lines >= 3 || digit_count >= 20)
+}
+
+/// Returns `true` for "situation is clear / no longer observed" updates that
+/// are not explicit all-clear alerts and should be suppressed.
+fn is_negative_update(lower: &str) -> bool {
+    // Explicit all-clear ("відбій", "чисте небо", etc.) is handled separately.
+    if detect_threats(lower).contains(&ThreatKind::AllClear) {
+        return false;
+    }
+
+    let negative_markers = [
+        "не спостеріга",
+        "не фіксу",
+        "чисто",
+        "все зник",
+        "зникла",
+        "більше не спостеріга",
+        "по цирконам минус",
+        "минус",
+    ];
+    let has_negative = negative_markers.iter().any(|m| lower.contains(m))
+        || lower.trim() == "все"
+        || lower.trim() == "все.";
+    if !has_negative {
+        return false;
+    }
+
+    // Keep clearly active updates.
+    let active_markers = [
+        "курсом на",
+        "у бік",
+        "в бік",
+        "вектор",
+        "летить",
+        "летят",
+        "руха",
+        "пуск",
+        "вихід",
+        "виход",
+        "загроз",
+        "увага",
+        "ще ",
+        "повторн",
+    ];
+    !active_markers.iter().any(|m| lower.contains(m))
+}
+
 // ───────────────────────────── Detection ─────────────────────────────────
 
 /// Scan lowercased text and return the set of detected threat kinds.
 /// More specific kinds suppress generic ones.
 fn detect_threats(lower: &str) -> Vec<ThreatKind> {
+    // Be tolerant to call sites: normalize here even though process() already
+    // lowercases once.
+    let lower_owned = lower.to_lowercase();
+    let lower = lower_owned.as_str();
+
+    fn contains_standalone_token(lower: &str, token: &str) -> bool {
+        let mut start = 0;
+        while let Some(rel) = lower[start..].find(token) {
+            let s = start + rel;
+            let e = s + token.len();
+            let prev_ok = lower[..s]
+                .chars()
+                .next_back()
+                .map(|c| !c.is_alphanumeric())
+                .unwrap_or(true);
+            let next_ok = lower[e..]
+                .chars()
+                .next()
+                .map(|c| !c.is_alphanumeric())
+                .unwrap_or(true);
+            if prev_ok && next_ok {
+                return true;
+            }
+            start = e;
+        }
+        false
+    }
+
+    fn detect_combo_threats(lower: &str) -> Vec<ThreatKind> {
+        let mut out = Vec::new();
+
+        // Cruise missile shorthand used heavily in real channels:
+        // "КР курсом на ...", "2х КР на ...".
+        if contains_standalone_token(lower, "кр")
+            && (lower.contains("курс")
+                || lower.contains("ракет")
+                || lower.contains("груп")
+                || lower.contains("на "))
+        {
+            out.push(ThreatKind::CruiseMissile);
+        }
+
+        // Strategic aviation shorthand pattern:
+        // "борти СА ... в повітрі", "зліт ... бортів СА".
+        let has_bort = lower.contains("борт");
+        let has_strat_marker = lower.contains("са")
+            || lower.contains("стратегічн")
+            || lower.contains("стратегическ")
+            || lower.contains("ту-95")
+            || lower.contains("ту-160");
+        let has_airborne_marker = lower.contains("в повітрі")
+            || lower.contains("в повітря")
+            || lower.contains("в воздухе")
+            || lower.contains("зліт");
+        if has_bort && has_strat_marker && has_airborne_marker {
+            out.push(ThreatKind::Aircraft);
+        }
+
+        // High-speed target shorthand from alert channels:
+        // "швидкісна ціль ...", "скоростная цель ...".
+        let has_fast_marker = lower.contains("швидкісн")
+            || lower.contains("скоростн")
+            || lower.contains("высокоскорост");
+        let has_target_marker = lower.contains("ціль") || lower.contains("цель");
+        if has_fast_marker && has_target_marker {
+            out.push(ThreatKind::Missile);
+        }
+
+        out
+    }
+
     let mut found: Vec<ThreatKind> = Vec::new();
 
     for &(kind, stems) in THREAT_KEYWORDS {
         if stems.iter().any(|s| lower.contains(s)) {
+            found.push(kind);
+        }
+    }
+    for kind in detect_combo_threats(lower) {
+        if !found.contains(&kind) {
             found.push(kind);
         }
     }
@@ -40,6 +207,11 @@ fn detect_threats(lower: &str) -> Vec<ThreatKind> {
         || found.contains(&ThreatKind::Hypersonic)
     {
         found.retain(|k| *k != ThreatKind::Missile);
+    }
+    // Treat Zircon/hypersonic reports as a single specific class.
+    // Avoid dual-labeling them as "CruiseMissile + Hypersonic".
+    if found.contains(&ThreatKind::Hypersonic) {
+        found.retain(|k| *k != ThreatKind::CruiseMissile);
     }
     // Suppress generic "Other" if anything more specific matched
     // (including AllClear — "відбій тривоги" shouldn't also produce Other).
@@ -211,12 +383,29 @@ impl ChannelContext {
     /// Check if the message contains trigger words ("ціль", "вихід", etc.)
     /// and infer the threat type from recent channel context.
     fn infer_threat_from_triggers(&mut self, lower: &str) -> Option<ThreatKind> {
+        fn has_celi_with_boundary(lower: &str) -> bool {
+            let mut start = 0;
+            while let Some(rel) = lower[start..].find("цели") {
+                let end = start + rel + "цели".len();
+                let boundary = lower[end..]
+                    .chars()
+                    .next()
+                    .map(|c| !c.is_alphabetic())
+                    .unwrap_or(true);
+                if boundary {
+                    return true;
+                }
+                start = end;
+            }
+            false
+        }
+
         // Check for target keywords
         let has_target = lower.contains("ціль")
             || lower.contains("цілі")
             || lower.contains("цілей")
             || lower.contains("цель")
-            || (lower.contains("цели ") || lower.contains("цели\n"))
+            || has_celi_with_boundary(lower)
             || lower.contains("целей");
 
         // Check for launch-related keywords (follow-up to an ongoing threat)
@@ -303,12 +492,39 @@ impl ChannelContext {
 struct DedupEntry {
     sent_at: Instant,
     max_proximity: Proximity,
+    /// Union of significant threat kinds already sent for this primary kind
+    /// during the dedup window.
+    seen_signature: u16,
+    /// Whether a nationwide variant of this primary threat has already
+    /// been forwarded during the dedup window.
+    seen_nationwide: bool,
     /// `true` when the cached message itself was an urgency-tagged one
     /// ("повторно", "додатково", …).
     was_urgent: bool,
+    /// Timestamp of the last forwarded urgent re-alert for this primary kind.
+    last_urgent_at: Option<Instant>,
     /// Stable channel peer-id.  Used to distinguish a genuine
     /// same-channel re-alert from cross-channel echo spam.
     last_channel_id: i64,
+}
+
+fn threat_bit(kind: ThreatKind) -> u16 {
+    match kind {
+        ThreatKind::Ballistic => 1 << 0,
+        ThreatKind::Hypersonic => 1 << 1,
+        ThreatKind::CruiseMissile => 1 << 2,
+        ThreatKind::GuidedBomb => 1 << 3,
+        ThreatKind::Missile => 1 << 4,
+        ThreatKind::Shahed => 1 << 5,
+        ThreatKind::ReconDrone => 1 << 6,
+        ThreatKind::Aircraft => 1 << 7,
+        ThreatKind::AllClear => 0,
+        ThreatKind::Other => 0,
+    }
+}
+
+fn threat_signature(threats: &[ThreatKind]) -> u16 {
+    threats.iter().fold(0u16, |acc, t| acc | threat_bit(*t))
 }
 
 /// Result of context-aware detection.
@@ -327,6 +543,9 @@ pub struct AlertFilter {
     channel_contexts: HashMap<i64, ChannelContext>,
     /// Duration for per-channel context windows.
     context_window: Duration,
+    /// Minimum delay between forwarded urgent re-alerts from the same channel
+    /// for the same primary threat kind.
+    urgent_same_channel_cooldown: Duration,
     /// When `true`, messages that contain threat keywords but do NOT match
     /// any user location are still forwarded (with `Proximity::None`).
     forward_all_threats: bool,
@@ -342,6 +561,7 @@ impl AlertFilter {
     /// | `MY_DISTRICT`          | —       | Comma-separated district name variants  |
     /// | `DEDUP_WINDOW_SECS`    | `180`   | Sliding dedup window in seconds         |
     /// | `CONTEXT_WINDOW_SECS`  | `300`   | Channel context window in seconds       |
+    /// | `URGENT_COOLDOWN_SECS` | `20`    | Same-channel urgent re-alert cooldown   |
     /// | `FORWARD_ALL_THREATS`  | `false` | Forward threats outside your area too   |
     pub fn from_env() -> Self {
         let location = LocationConfig::from_env();
@@ -353,6 +573,10 @@ impl AlertFilter {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(300);
+        let urgent_cooldown_secs: u64 = std::env::var("URGENT_COOLDOWN_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
         let forward_all: bool = std::env::var("FORWARD_ALL_THREATS")
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -364,6 +588,7 @@ impl AlertFilter {
             cache: HashMap::new(),
             channel_contexts: HashMap::new(),
             context_window: Duration::from_secs(context_secs),
+            urgent_same_channel_cooldown: Duration::from_secs(urgent_cooldown_secs),
             forward_all_threats: forward_all,
         }
     }
@@ -373,6 +598,12 @@ impl AlertFilter {
         let now = Instant::now();
         self.cache
             .retain(|_, e| now.duration_since(e.sent_at) < self.dedup_window);
+
+        // Drop stale per-channel windows to prevent unbounded map growth.
+        self.channel_contexts.retain(|_, ctx| {
+            ctx.evict();
+            !ctx.messages.is_empty()
+        });
     }
 
     /// Back-compat wrapper used by tests. Prefer [`process_with_id`] when
@@ -398,6 +629,14 @@ impl AlertFilter {
         text: &str,
     ) -> Option<String> {
         let lower = text.to_lowercase();
+        if is_informational_report(&lower) {
+            debug!("Informational recap/statistics post – skipping");
+            return None;
+        }
+        if is_negative_update(&lower) {
+            debug!("Negative-status update (clear/no longer observed) – skipping");
+            return None;
+        }
 
         let det = self.detect_with_context(channel_id, &lower, channel_title)?;
 
@@ -433,6 +672,14 @@ impl AlertFilter {
         llm: &crate::llm::LlmFilter,
     ) -> Option<String> {
         let lower = text.to_lowercase();
+        if is_informational_report(&lower) {
+            debug!("Informational recap/statistics post – skipping");
+            return None;
+        }
+        if is_negative_update(&lower) {
+            debug!("Negative-status update (clear/no longer observed) – skipping");
+            return None;
+        }
 
         let det = self.detect_with_context(channel_id, &lower, channel_title)?;
 
@@ -507,24 +754,16 @@ impl AlertFilter {
                 }
             }
 
-            // 2b. Location present but no threat → infer threat from context
-            if proximity != Proximity::None && threats.is_empty() {
+            // 2b. Location present or urgent, but no threat → infer threat from context.
+            if threats.is_empty() && (proximity != Proximity::None || urgent) {
                 if let Some(inferred) = context.infer_recent_threat() {
-                    debug!("Inferred {inferred:?} from context (has location, no threat keyword)");
+                    debug!("Inferred {inferred:?} from context (no threat keyword)");
                     threats.push(inferred);
                 }
             }
 
-            // 2c. Urgent but no threat → infer threat from context
-            if urgent && threats.is_empty() {
-                if let Some(inferred) = context.infer_recent_threat() {
-                    debug!("Inferred {inferred:?} from context (urgent, no threat keyword)");
-                    threats.push(inferred);
-                }
-            }
-
-            // 2d. Have threat but no location → infer location from context
-            if !threats.is_empty() && proximity == Proximity::None && !nationwide {
+            // 2c. Have threat or urgency, but no location → infer location once from context.
+            if proximity == Proximity::None && !nationwide && (!threats.is_empty() || urgent) {
                 let ctx_prox = context.infer_location();
                 if ctx_prox != Proximity::None {
                     debug!("Inferred location {ctx_prox:?} from context");
@@ -532,18 +771,19 @@ impl AlertFilter {
                 }
             }
 
-            // 2e. Urgent with no location → infer location from context
-            if urgent && proximity == Proximity::None && !nationwide {
-                let ctx_prox = context.infer_location();
-                if ctx_prox != Proximity::None {
-                    debug!("Inferred location {ctx_prox:?} from context (urgent)");
-                    proximity = ctx_prox;
-                }
-            }
-
             // Store in context (even if we won't forward — seeds future inference)
             if !threats.is_empty() || proximity != Proximity::None {
                 context.add(lower.to_owned(), threats.clone(), proximity);
+            }
+        }
+
+        // Phase 3 — refine generic Missile using recent cross-channel context.
+        // During dense bursts, "4 ракети на Київ" should align with the
+        // already-established specific threat type (e.g. Ballistic).
+        if threats.len() == 1 && threats[0] == ThreatKind::Missile {
+            if let Some(inferred) = self.infer_recent_global_specific_threat() {
+                debug!("Refined generic Missile -> {inferred:?} from global context");
+                threats[0] = inferred;
             }
         }
 
@@ -565,6 +805,31 @@ impl AlertFilter {
         self.channel_contexts
             .entry(channel_id)
             .or_insert_with(|| ChannelContext::new(window))
+    }
+
+    /// Infer the most recent specific threat across all channel windows.
+    /// Excludes generic Missile/Other/AllClear to avoid noisy promotion.
+    fn infer_recent_global_specific_threat(&mut self) -> Option<ThreatKind> {
+        let mut best: Option<(Instant, ThreatKind)> = None;
+
+        for ctx in self.channel_contexts.values_mut() {
+            ctx.evict();
+            for msg in ctx.messages.iter().rev() {
+                if let Some(&threat) = msg.detected_threats.iter().find(|t| {
+                    !matches!(
+                        t,
+                        ThreatKind::Other | ThreatKind::AllClear | ThreatKind::Missile
+                    )
+                }) {
+                    match best {
+                        Some((ts, _)) if ts >= msg.timestamp => {}
+                        _ => best = Some((msg.timestamp, threat)),
+                    }
+                }
+            }
+        }
+
+        best.map(|(_, t)| t)
     }
 
     /// If the threats are a sole AllClear, format and clear cache.
@@ -620,6 +885,7 @@ impl AlertFilter {
         let now = Instant::now();
 
         let primary = threats.iter().copied().max_by_key(|k| k.specificity())?;
+        let signature = threat_signature(threats);
 
         if let Some(entry) = self.cache.get(&primary) {
             if proximity > entry.max_proximity {
@@ -627,10 +893,25 @@ impl AlertFilter {
                     "Dedup upgrade: {primary:?} {:?} → {proximity:?}",
                     entry.max_proximity
                 );
+            } else if nationwide && !entry.seen_nationwide {
+                debug!("Dedup: first nationwide alert for {primary:?} – forwarding");
+            } else if signature & !entry.seen_signature != 0 {
+                debug!("Dedup: new threat combination for {primary:?} – forwarding");
             } else if urgent && !entry.was_urgent {
                 debug!("Dedup: first urgent re-alert for {primary:?} – forwarding");
             } else if urgent && entry.last_channel_id == channel_id {
-                debug!("Dedup: same-channel re-alert for {primary:?} – forwarding");
+                let can_forward = entry.last_urgent_at.map_or(true, |ts| {
+                    now.duration_since(ts) >= self.urgent_same_channel_cooldown
+                });
+                if can_forward {
+                    debug!("Dedup: same-channel re-alert for {primary:?} – forwarding");
+                } else {
+                    debug!(
+                        "Dedup: same-channel urgent throttled for {primary:?} (cooldown={}s)",
+                        self.urgent_same_channel_cooldown.as_secs()
+                    );
+                    return None;
+                }
             } else {
                 debug!(
                     "Dedup: {primary:?}/{proximity:?} suppressed (already sent {:?}, urgent={}, ch_id={})",
@@ -646,7 +927,20 @@ impl AlertFilter {
             DedupEntry {
                 sent_at: now,
                 max_proximity: prev_max.map_or(proximity, |p| proximity.max(p)),
+                seen_signature: self
+                    .cache
+                    .get(&primary)
+                    .map_or(signature, |e| e.seen_signature | signature),
+                seen_nationwide: self
+                    .cache
+                    .get(&primary)
+                    .map_or(nationwide, |e| e.seen_nationwide || nationwide),
                 was_urgent: urgent,
+                last_urgent_at: if urgent {
+                    Some(now)
+                } else {
+                    self.cache.get(&primary).and_then(|e| e.last_urgent_at)
+                },
                 last_channel_id: channel_id,
             },
         );
@@ -712,11 +1006,12 @@ impl fmt::Display for AlertFilter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "AlertFilter(oblast={:?}, city={:?}, district={:?}, dedup={}s, fwd_all={})",
+            "AlertFilter(oblast={:?}, city={:?}, district={:?}, dedup={}s, urgent_cd={}s, fwd_all={})",
             self.location.oblast,
             self.location.city,
             self.location.district,
             self.dedup_window.as_secs(),
+            self.urgent_same_channel_cooldown.as_secs(),
             self.forward_all_threats,
         )
     }
@@ -741,6 +1036,7 @@ pub fn kyiv_filter() -> AlertFilter {
         cache: HashMap::new(),
         channel_contexts: HashMap::new(),
         context_window: Duration::from_secs(300),
+        urgent_same_channel_cooldown: Duration::from_secs(0),
         forward_all_threats: false,
     }
 }
@@ -757,6 +1053,7 @@ pub fn kharkiv_filter() -> AlertFilter {
         cache: HashMap::new(),
         channel_contexts: HashMap::new(),
         context_window: Duration::from_secs(300),
+        urgent_same_channel_cooldown: Duration::from_secs(0),
         forward_all_threats: false,
     }
 }

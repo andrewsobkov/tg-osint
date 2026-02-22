@@ -8,7 +8,7 @@ use super::shared::{load_bot_cfg, load_dump_events, load_replay_cfg};
 
 pub(super) async fn run() -> Result<()> {
     let replay = load_replay_cfg()?;
-    let events = load_dump_events(&replay.input_path)?;
+    let events = load_dump_events(&replay.input_path, &replay)?;
     if events.is_empty() {
         return Err(anyhow!("Replay input is empty: {}", replay.input_path));
     }
@@ -19,6 +19,10 @@ pub(super) async fn run() -> Result<()> {
         "Replay started: {} events from {}",
         events.len(),
         replay.input_path
+    );
+    info!(
+        "Replay slice: from_line={:?}, to_line={:?}, limit={:?}",
+        replay.from_line, replay.to_line, replay.limit
     );
     info!("Filter config: {alert_filter}");
     info!("LLM filter: {llm_filter}");

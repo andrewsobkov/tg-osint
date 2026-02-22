@@ -39,7 +39,8 @@ A Telegram OSINT tool written in Rust that monitors Ukrainian air-raid / militar
    MY_DISTRICT=Шевченківськ,Шевченковск
    DEDUP_WINDOW_SECS=180                      # optional, default 180
    CONTEXT_WINDOW_SECS=300                    # optional, default 300 (5 min)
-   FORWARD_ALL_THREATS=false                   # optional, forward threats outside your area
+   URGENT_COOLDOWN_SECS=20                    # optional, same-channel urgent re-alert cooldown
+   FORWARD_ALL_THREATS=false                  # optional, forward threats outside your area
    ```
 
 3. Run:
@@ -77,12 +78,25 @@ REPLAY_SPEED=10 \
 cargo run
 ```
 
+Replay only a fragment (for example lines 308..434 from a JSONL dump):
+
+```bash
+RUN_MODE=replay \
+REPLAY_INPUT_PATH=./dumps/2026-02-22.jsonl \
+REPLAY_FROM_LINE=308 \
+REPLAY_TO_LINE=434 \
+REPLAY_SPEED=100 \
+cargo run
+```
+
 Replay timing options:
 
 - `REPLAY_SPEED` (default `1.0`): `10` means 10x faster than original timing.
 - `REPLAY_STEP_MS`: fixed delay between all events (overrides timestamp-based replay).
 - `REPLAY_MIN_DELAY_MS` (default `0`) and `REPLAY_MAX_DELAY_MS` (default `10000`): clamp replay delays.
 - `REPLAY_BROADCAST` (default `false`): if `true`, replayed alerts are sent via bot subscribers; otherwise printed to stdout.
+- `REPLAY_FROM_LINE` / `REPLAY_TO_LINE`: 1-based inclusive line range in input JSONL.
+- `REPLAY_LIMIT`: maximum number of events to load after line filtering.
 
 ## Environment Variables
 
@@ -101,6 +115,7 @@ Replay timing options:
 | `BOT_DB_PATH` | ❌ | Path for the subscriber SQLite file (default: `./bot_subscribers.sqlite`) |
 | `DEDUP_WINDOW_SECS` | ❌ | Dedup sliding window in seconds (default: `180`) |
 | `CONTEXT_WINDOW_SECS` | ❌ | Per-channel context window for threat inference in seconds (default: `300`) |
+| `URGENT_COOLDOWN_SECS` | ❌ | Minimum delay for same-channel urgent re-alerts (default: `20`) |
 | `FORWARD_ALL_THREATS` | ❌ | `true` to forward alerts even outside your area (default: `false`) |
 | `LLM_ENABLED` | ❌ | `true` to enable LLM secondary filter (default: `false`) |
 | `LLM_MODEL` | ❌ | Ollama model name (default: `qwen2.5:7b`) |
@@ -115,6 +130,9 @@ Replay timing options:
 | `REPLAY_MIN_DELAY_MS` | ❌ | Minimum delay in ms for timestamp replay (default: `0`) |
 | `REPLAY_MAX_DELAY_MS` | ❌ | Maximum delay in ms for timestamp replay (default: `10000`) |
 | `REPLAY_BROADCAST` | ❌ | `true` to send replay alerts via bot, otherwise stdout (default: `false`) |
+| `REPLAY_FROM_LINE` | ❌ | 1-based start line (inclusive) to replay from JSONL |
+| `REPLAY_TO_LINE` | ❌ | 1-based end line (inclusive) to replay from JSONL |
+| `REPLAY_LIMIT` | ❌ | Max loaded events after line filtering |
 
 > **Tip:** Use short stems to catch all Ukrainian/Russian declension forms.
 > For example, `Київ` matches "Київ", "Києву"; `Киев` matches "Киев", "Киеву", "Киева".
@@ -140,11 +158,11 @@ Channel message
   │   └─ Fail-open: on timeout/error, keyword result used as-is
   │
   ├─ Urgency check ("повторно", "нова хвиля", "терміново" …)
-  │   └─ Urgent? → forward (once per source channel, not cross-channel echo)
+  │   └─ Urgent? → forward (not cross-channel echo; same-channel repeats throttled by URGENT_COOLDOWN_SECS)
   │
-  ├─ Dedup (same ThreatKind within DEDUP_WINDOW_SECS)
+  ├─ Dedup (same primary ThreatKind within DEDUP_WINDOW_SECS)
   │   ├─ Same or lower proximity? → skip
-  │   └─ Proximity upgrade (oblast → city → district)? → forward
+  │   └─ Proximity upgrade OR first nationwide OR new threat combination? → forward
   │
   └─ Format & broadcast to all /start_receive subscribers
 ```

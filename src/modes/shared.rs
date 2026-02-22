@@ -18,6 +18,9 @@ pub(super) struct ReplayCfg {
     pub min_delay_ms: u64,
     pub max_delay_ms: u64,
     pub broadcast: bool,
+    pub from_line: Option<usize>,
+    pub to_line: Option<usize>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +68,25 @@ pub(super) fn load_replay_cfg() -> Result<ReplayCfg> {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(10_000);
+    let from_line = std::env::var("REPLAY_FROM_LINE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0);
+    let to_line = std::env::var("REPLAY_TO_LINE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0);
+    if let (Some(from), Some(to)) = (from_line, to_line) {
+        if from > to {
+            return Err(anyhow!(
+                "Invalid replay line range: REPLAY_FROM_LINE ({from}) > REPLAY_TO_LINE ({to})"
+            ));
+        }
+    }
+    let limit = std::env::var("REPLAY_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0);
 
     Ok(ReplayCfg {
         input_path,
@@ -73,6 +95,9 @@ pub(super) fn load_replay_cfg() -> Result<ReplayCfg> {
         min_delay_ms,
         max_delay_ms,
         broadcast: parse_bool_env("REPLAY_BROADCAST", false),
+        from_line,
+        to_line,
+        limit,
     })
 }
 
@@ -92,19 +117,30 @@ pub(super) fn start_of_today_utc_from_offset(offset_minutes: i32) -> Result<i64>
     Ok(local_start.with_timezone(&Utc).timestamp())
 }
 
-pub(super) fn load_dump_events(path: &str) -> Result<Vec<DumpEvent>> {
+pub(super) fn load_dump_events(path: &str, replay: &ReplayCfg) -> Result<Vec<DumpEvent>> {
     let file = File::open(path).with_context(|| format!("failed to open replay file {path}"))?;
     let reader = BufReader::new(file);
 
+    let from_line = replay.from_line.unwrap_or(1);
+    let to_line = replay.to_line.unwrap_or(usize::MAX);
+    let limit = replay.limit.unwrap_or(usize::MAX);
+
     let mut events = Vec::new();
     for (idx, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("failed to read line {}", idx + 1))?;
+        let line_no = idx + 1;
+        let line = line.with_context(|| format!("failed to read line {}", line_no))?;
         if line.trim().is_empty() {
             continue;
         }
+        if line_no < from_line || line_no > to_line {
+            continue;
+        }
         let event: DumpEvent = serde_json::from_str(&line)
-            .with_context(|| format!("invalid JSON at line {}", idx + 1))?;
+            .with_context(|| format!("invalid JSON at line {}", line_no))?;
         events.push(event);
+        if events.len() >= limit {
+            break;
+        }
     }
 
     events.sort_by_key(|e| (e.timestamp, e.channel_id));

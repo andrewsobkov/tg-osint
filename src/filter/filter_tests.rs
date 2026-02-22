@@ -104,6 +104,16 @@ mod tests {
         assert!(threats.contains(&ThreatKind::Hypersonic));
     }
 
+    #[test]
+    fn zircon_kr_phrase_is_hypersonic_only() {
+        let threats = detect_threats("КР Циркон на Київ");
+        assert!(threats.contains(&ThreatKind::Hypersonic));
+        assert!(
+            !threats.contains(&ThreatKind::CruiseMissile),
+            "Zircon phrase should not be dual-labeled as CruiseMissile: {threats:?}"
+        );
+    }
+
     // ── New categories: Guided bomb (КАБ) ──
 
     #[test]
@@ -171,6 +181,13 @@ mod tests {
         assert!(threats.contains(&ThreatKind::Aircraft));
     }
 
+    #[test]
+    fn detects_aircraft_borts_sa_combo() {
+        // Real dump pattern: "бортів СА ... в повітря".
+        let threats = detect_threats("близько 5 бортів СА піднято в повітря");
+        assert!(threats.contains(&ThreatKind::Aircraft));
+    }
+
     // ── Expanded generic missile ──
 
     #[test]
@@ -183,6 +200,44 @@ mod tests {
     fn detects_heading_to_ua() {
         let threats = detect_threats("ракети курсом на захід");
         assert!(threats.contains(&ThreatKind::Missile));
+    }
+
+    #[test]
+    fn detects_cruise_missile_abbrev_kr_combo() {
+        // Real dump pattern: "2х КР курсом на ...".
+        let threats = detect_threats("2х КР курсом на Гадяч");
+        assert!(threats.contains(&ThreatKind::CruiseMissile));
+        assert!(!threats.contains(&ThreatKind::Missile));
+    }
+
+    #[test]
+    fn detects_cruise_missile_abbrev_kr_with_location() {
+        // Real dump pattern: "КР на ... курсом на ...".
+        let threats = detect_threats("КР на Сумщині курсом на Липову Долину");
+        assert!(threats.contains(&ThreatKind::CruiseMissile));
+    }
+
+    #[test]
+    fn detects_fast_target_combo_ua() {
+        // Real dump pattern: "Швидкісна ціль ... курсом ...".
+        let threats = detect_threats("Швидкісна ціль на Чернігівщині, курсом на Київ.");
+        assert!(threats.contains(&ThreatKind::Missile));
+    }
+
+    #[test]
+    fn detects_fast_target_combo_ru() {
+        let threats = detect_threats("Скоростная цель курсом на город");
+        assert!(threats.contains(&ThreatKind::Missile));
+    }
+
+    #[test]
+    fn no_false_cruise_on_kr_inside_word() {
+        // "кр" inside a larger token must not be treated as cruise abbreviation.
+        let threats = detect_threats("ситуація в кролевці спокійна");
+        assert!(
+            !threats.contains(&ThreatKind::CruiseMissile),
+            "embedded 'кр' should not trigger CruiseMissile: {threats:?}"
+        );
     }
 
     // ── Expanded Other (catch-all) ──
@@ -282,33 +337,34 @@ mod tests {
     #[test]
     fn still_detects_real_targets() {
         // "ціль"/"цель" patterns are handled by context inference (not raw
-        // keyword detection).  Verify they are caught via process_with_id,
-        // which calls infer_target_threat (defaults to Missile when there
-        // is no prior context).
-        let mut filter = kyiv_filter();
-        filter.forward_all_threats = true; // bypass location for these checks
+        // keyword detection). Verify they are caught via process_with_id.
+        // Use a fresh filter per case so dedup does not mask trigger matching.
+        let run = |msg: &str| {
+            let mut filter = kyiv_filter();
+            filter.forward_all_threats = true; // bypass location for these checks
+            filter.process_with_id(1, "Ch", msg)
+        };
 
-        // Each call uses a different channel_id so dedup doesn't interfere.
-        let r1 = filter.process_with_id(1, "Ch", "ціль на київ!");
+        let r1 = run("ціль на київ!");
         assert!(r1.is_some(), "\"ціль на\" must match via context inference");
 
-        let r2 = filter.process_with_id(2, "Ch", "2 цілі на захід");
+        let r2 = run("2 цілі на захід");
         assert!(r2.is_some(), "\"цілі на\" must match via context inference");
 
-        let r3 = filter.process_with_id(3, "Ch", "цель на киев");
+        let r3 = run("цель на киев");
         assert!(r3.is_some(), "\"цель на\" must match via context inference");
 
-        let r4 = filter.process_with_id(4, "Ch", "3 цели на днепр");
+        let r4 = run("3 цели на днепр");
         assert!(r4.is_some(), "\"цели \" must match via context inference");
 
         // End-of-string / end-of-line
-        let r5 = filter.process_with_id(5, "Ch", "нова ціль");
+        let r5 = run("нова ціль");
         assert!(
             r5.is_some(),
             "\"ціль\" at end must match via context inference"
         );
 
-        let r6 = filter.process_with_id(6, "Ch", "ще одна ціль\nна захід");
+        let r6 = run("ще одна ціль\nна захід");
         assert!(r6.is_some(), "\"ціль\\n\" must match via context inference");
     }
 
@@ -329,6 +385,67 @@ mod tests {
              відносно спокійно. Не рахуючи схід та Одещину.",
         );
         assert!(r.is_none(), "Analytical report should NOT be forwarded");
+    }
+
+    #[test]
+    fn process_skips_informational_statistics_post() {
+        // Real-world recap format from official channels: many threat words,
+        // but mostly retrospective statistics and battle-damage summary.
+        let mut filter = kyiv_filter();
+        let msg = "⚡️ ЗБИТО/ПОДАВЛЕНО 33 РАКЕТИ ТА 274 ВОРОЖИХ БПЛА\n\
+                   У ніч на 22 лютого противник завдав комбінованого удару.\n\
+                   Усього зафіксовано 345 засобів повітряного нападу:\n\
+                   - 4 протикорабельні ракети \"Циркон\";\n\
+                   - 22 балістичні ракети Іскандер-М/С-400;\n\
+                   - 18 крилатих ракет Х-101;\n\
+                   - 297 ударних БпЛА.\n\
+                   За попередніми даними, станом на 10:00, збито/подавлено 307 цілей.\n\
+                   Зафіксовано влучання на 14 локаціях.\n\
+                   Інформація щодо кількох ворожих ракет уточнюється.\n\
+                   ✊Тримаймо небо!\n\
+                   🇺🇦 Разом – до перемоги!";
+        let r = filter.process("ПС ЗСУ", msg);
+        assert!(
+            r.is_none(),
+            "Large retrospective statistics post should be suppressed"
+        );
+    }
+
+    #[test]
+    fn informational_filter_keeps_live_movement_alert() {
+        let mut filter = kyiv_filter();
+        let r = filter.process("ПС ЗСУ", "Швидкісна ціль на Чернігівщині, курсом на Київ.");
+        assert!(
+            r.is_some(),
+            "Live trajectory alert must NOT be suppressed as informational"
+        );
+    }
+
+    #[test]
+    fn process_skips_negative_status_updates() {
+        let mut filter = kyiv_filter();
+        filter.forward_all_threats = true;
+
+        // Seed active context first.
+        let _ = filter.process("monitor", "КР Циркон на Київ");
+
+        let r1 = filter.process("monitor", "Більше не спостерігається, пролунав вибух.");
+        assert!(
+            r1.is_none(),
+            "negative-status phrasing should be suppressed"
+        );
+
+        let r2 = filter.process("monitor", "Не фіксуються.");
+        assert!(
+            r2.is_none(),
+            "negative-status phrasing should be suppressed"
+        );
+
+        let r3 = filter.process("monitor", "Все");
+        assert!(
+            r3.is_none(),
+            "short 'Все' status update should be suppressed"
+        );
     }
 
     #[test]
@@ -508,6 +625,36 @@ mod tests {
     }
 
     #[test]
+    fn dedup_allows_nationwide_after_local() {
+        let mut filter = kyiv_filter();
+        let r1 = filter.process("Ch1", "баллистика на киев!");
+        assert!(r1.is_some());
+
+        // Must still forward because nationwide scope changed (larger impact),
+        // even though proximity is not an upgrade.
+        let r2 = filter.process("Ch2", "баллистика по всей территории украины");
+        assert!(r2.is_some(), "Nationwide alert should bypass local dedup");
+        assert!(r2.unwrap().contains("ВСЯ УКРАЇНА"));
+    }
+
+    #[test]
+    fn dedup_allows_new_secondary_threat_same_primary() {
+        let mut filter = kyiv_filter();
+        let r1 = filter.process("Ch1", "баллистика на киев");
+        assert!(r1.is_some());
+
+        // Primary remains Ballistic, but Shahed is new info and should pass.
+        let r2 = filter.process("Ch2", "баллистика та шахеди на київ");
+        assert!(
+            r2.is_some(),
+            "New secondary threat should not be suppressed by primary-kind dedup"
+        );
+        let text = r2.unwrap();
+        assert!(text.contains("Балістика"));
+        assert!(text.contains("Шахед"));
+    }
+
+    #[test]
     fn different_threat_kinds_not_deduped() {
         let mut filter = kyiv_filter();
         let r1 = filter.process("Ch1", "мопеды летят к киеву");
@@ -525,6 +672,119 @@ mod tests {
         let r2 = filter.process("Ch1", "повторно баллистика на киев!");
         assert!(r2.is_some());
         assert!(r2.unwrap().contains("ПОВТОРНО"));
+    }
+
+    #[test]
+    fn same_channel_urgent_respects_cooldown() {
+        let mut filter = kyiv_filter();
+        filter.urgent_same_channel_cooldown = Duration::from_millis(60);
+
+        let r1 = filter.process("Ch1", "баллистика на киев!");
+        assert!(r1.is_some());
+
+        let r2 = filter.process("Ch1", "повторно баллистика на киев!");
+        assert!(r2.is_some(), "first urgent re-alert should pass");
+
+        let r3 = filter.process("Ch1", "повторно баллистика на киев!");
+        assert!(
+            r3.is_none(),
+            "urgent re-alert inside cooldown should be throttled"
+        );
+
+        std::thread::sleep(Duration::from_millis(70));
+        let r4 = filter.process("Ch1", "повторно баллистика на киев!");
+        assert!(
+            r4.is_some(),
+            "urgent re-alert after cooldown should pass again"
+        );
+    }
+
+    #[test]
+    fn dump_fragment_ballistic_burst_expected_forwards() {
+        // Condensed replay of the 2026-02-22 burst around lines 140..224.
+        // Expected with current logic:
+        // 1) first city-level Ballistic alert -> forward
+        // 2) "4 ракети на Київ" is refined to Ballistic from burst context -> deduped
+        // 3) first urgent same-threat re-alert ("повторний вихід") -> forward
+        // all other duplicates in the short window -> suppressed
+        let mut filter = kyiv_filter();
+
+        let ch_monitor: i64 = 1641260594;
+        let ch_kyiv_nebo: i64 = 2146225839;
+        let ch_radar: i64 = 1779278127;
+        let ch_monitoring: i64 = 1550485924;
+        let ch_kyiv_ad: i64 = 2486466109;
+
+        let inputs = [
+            // No Kyiv location yet -> seeds context, not forwarded.
+            (
+                ch_monitor,
+                "monitor",
+                "🟣 Загроза балістики з Північного Сходу. Брянськ.",
+            ),
+            // First city Ballistic.
+            (ch_kyiv_nebo, "Київське небо 🌌", "Балістика на Київ"),
+            // Generic wording, but should be treated as Ballistic in this context.
+            (ch_radar, "Чому тривога | Радар", "4 ракети на Київ"),
+            // Duplicate Ballistic with city -> suppressed.
+            (
+                ch_monitoring,
+                "monitoring",
+                "Виходи балістики з Брянської області. Київ/область — уважно.",
+            ),
+            // Phrase with no explicit threat keyword; inferred from context and deduped.
+            (ch_kyiv_ad, "Kyiv AirDefense 🌇", "Швидкісні на Київ!"),
+            // Urgent re-alert from the same monitor channel -> forwarded.
+            (ch_monitor, "monitor", "☄ Повторний вихід у напрямку Київ"),
+            // Another duplicate Ballistic -> suppressed.
+            (ch_monitoring, "monitoring", "Балістика на Київ."),
+        ];
+
+        let mut forwarded = Vec::new();
+        for (ch_id, title, text) in inputs {
+            if let Some(alert) = filter.process_with_id(ch_id, title, text) {
+                forwarded.push(alert);
+            }
+        }
+
+        assert_eq!(
+            forwarded.len(),
+            2,
+            "Expected exactly 2 forwarded alerts in this burst"
+        );
+        assert!(
+            forwarded.iter().any(|a| a.contains("Балістика")),
+            "Should forward a Ballistic city alert"
+        );
+        assert!(
+            forwarded.iter().any(|a| a.contains("ПОВТОРНО")),
+            "Should forward one urgent re-alert"
+        );
+    }
+
+    #[test]
+    fn global_context_refines_generic_rocket_to_ballistic() {
+        let mut filter = kyiv_filter();
+        let ch1: i64 = 900001;
+        let ch2: i64 = 900002;
+
+        // Seed global context with Ballistic, but without user location match,
+        // so it doesn't produce an outward alert.
+        let seed = filter.process_with_id(ch1, "Seed", "загроза балістики з брянська");
+        assert!(seed.is_none());
+
+        // Generic "ракети" should be refined to Ballistic from recent context.
+        let r = filter.process_with_id(ch2, "Radar", "4 ракети на київ");
+        assert!(r.is_some());
+        let text = r.unwrap();
+        assert!(
+            text.contains("Балістика"),
+            "Should refine to Ballistic: {text}"
+        );
+        assert!(
+            !text.contains("Ракета"),
+            "Should avoid generic Missile label in this context: {text}"
+        );
     }
 
     #[test]
